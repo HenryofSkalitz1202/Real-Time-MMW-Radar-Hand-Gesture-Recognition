@@ -81,25 +81,27 @@ class DS_TCN_Branch(nn.Module):
     def forward(self, x):
         return self.network(x)
 
-# 5. Multi-Branch Network (Your 3 Features)
+# 5. Multi-Branch Network (4 Features - Range, Doppler, Azimuth, Elevation)
 class GestureRecognitionFrontend(nn.Module):
     def __init__(self):
         super().__init__()
-        # One independent TCN branch for each feature
+        # One independent TCN branch for each of the 4 features
         self.range_tcn = DS_TCN_Branch()
         self.doppler_tcn = DS_TCN_Branch()
         self.azimuth_tcn = DS_TCN_Branch()
+        self.elevation_tcn = DS_TCN_Branch() # NEW: Elevation Branch
 
-    def forward(self, range_seq, doppler_seq, azimuth_seq):
+    def forward(self, range_seq, doppler_seq, azimuth_seq, elevation_seq):
         # Pass each 1D sequence through its respective TCN
         out_r = self.range_tcn(range_seq)
         out_d = self.doppler_tcn(doppler_seq)
         out_a = self.azimuth_tcn(azimuth_seq)
+        out_e = self.elevation_tcn(elevation_seq) # NEW
         
         # Concatenate outputs along the channel dimension (Stage 2 preparation)
         # Each output is [Batch, 16 channels, 40 frames]
-        # Merged output will be [Batch, 48 channels, 40 frames]
-        merged_features = torch.cat([out_r, out_d, out_a], dim=1)
+        # Merged output is now [Batch, 64 channels, 40 frames] (16 * 4 = 64)
+        merged_features = torch.cat([out_r, out_d, out_a, out_e], dim=1)
         return merged_features
 
 class ECA(nn.Module):
@@ -146,14 +148,15 @@ class DS_CA_Block(nn.Module):
     
 class GestureRecognitionNetwork(nn.Module):
     """The Complete Two-Stage Architecture """
-    def __init__(self, num_classes=12): # You have 12 gestures in your folder!
+    def __init__(self, num_classes=7): # Updated to 7 for 6 gestures + 1 rest class
         super().__init__()
         
         # Stage 1: Feature Extraction
         self.frontend = GestureRecognitionFrontend()
         
-        # Stage 2: Channel-wise Fusion (From Table III in the paper)
-        self.fusion_block1 = DS_CA_Block(in_channels=48, out_channels=128)
+        # Stage 2: Channel-wise Fusion 
+        # INPUT CHANNELS CHANGED TO 64 (4 branches * 16 channels)
+        self.fusion_block1 = DS_CA_Block(in_channels=64, out_channels=128)
         self.fusion_block2 = DS_CA_Block(in_channels=128, out_channels=128)
         
         self.dropout = nn.Dropout(0.3)
@@ -162,9 +165,9 @@ class GestureRecognitionNetwork(nn.Module):
         # Flattened size: 128 channels * 10 frames = 1280
         self.fc = nn.Linear(1280, num_classes)
 
-    def forward(self, range_seq, doppler_seq, azimuth_seq):
-        # Stage 1
-        x = self.frontend(range_seq, doppler_seq, azimuth_seq) # [Batch, 48, 40]
+    def forward(self, range_seq, doppler_seq, azimuth_seq, elevation_seq):
+        # Stage 1 (Now passes all 4 sequences)
+        x = self.frontend(range_seq, doppler_seq, azimuth_seq, elevation_seq) # [Batch, 64, 40]
         
         # Stage 2
         x = self.fusion_block1(x) # [Batch, 128, 20]
@@ -173,6 +176,6 @@ class GestureRecognitionNetwork(nn.Module):
         # Classification
         x = self.dropout(x)
         x = x.view(x.size(0), -1) # Flatten to [Batch, 1280]
-        logits = self.fc(x)       # [Batch, 12]
+        logits = self.fc(x)       # [Batch, num_classes]
         
         return logits
