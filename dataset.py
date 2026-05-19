@@ -40,5 +40,6 @@ class RadarGestureDataset(Dataset):
         range_seq = torch.tensor(feature_matrix[0:1, :])    # Shape: (1, 40)
         vel_seq = torch.tensor(feature_matrix[1:2, :])      # Shape: (1, 40)
         az_seq = torch.tensor(feature_matrix[2:3, :])       # Shape: (1, 40)
+        el_seq = torch.tensor(feature_matrix[3:4, :])       # Shape: (1, 40)
         
-        return range_seq, vel_seq, az_seq, torch.tensor(label, dtype=torch.long)
+        return range_seq, vel_seq, az_seq, el_seq, torch.tensor(label, dtype=torch.long)

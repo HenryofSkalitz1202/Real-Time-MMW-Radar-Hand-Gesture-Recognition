@@ -15,46 +15,50 @@ from model.lstm import LSTM_Gesture_Network
 
 def main():
     print("="*50)
-    print("mmWave Hand Gesture Recognition Pipeline")
+    print("mmWave Hand Gesture Recognition Pipeline (4-Feature Edition)")
     print("="*50)
     
-    # --- 1. Model Selection UI ---
-    print("Available Models:")
-    print("1: FMCW Lightweight (DS-TCN + ECA)")
-    print("2: SRDST Adapted (Dual-Stream Transformer)")
-    print("3: LSTM (Grobelny & Narbudowicz) - 2 Layers, 32 Neurons")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # --- 1. Load Dataset FIRST to dynamically get num_classes ---
+    print("\nLoading dataset...")
+    # Make sure "Data" is the folder containing your 7 new gesture classes
+    full_dataset = RadarGestureDataset(data_dir="Data", seq_length=40)
+    labels = [sample[1] for sample in full_dataset.samples]
+    
+    NUM_CLASSES = len(full_dataset.classes)
+    print(f"Detected {NUM_CLASSES} classes: {full_dataset.classes}")
+
+    # --- 2. Model Selection UI ---
+    print("\nAvailable Models:")
+    print("1: FMCW Lightweight (DS-TCN + ECA) [UPDATED FOR 4 INPUTS]")
+    print("2: SRDST Adapted (Dual-Stream Transformer) [REQUIRES 3 INPUTS]")
+    print("3: LSTM (Grobelny & Narbudowicz) [REQUIRES 3 INPUTS]")
     
     choice = input("Enter the number of the model to train (1, 2, or 3): ").strip()
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\nUsing device: {device}")
 
     if choice == '3':
-        print("Initializing LSTM Model...")
-        model = LSTM_Gesture_Network(num_classes=12).to(device)
+        print(f"Initializing LSTM Model for {NUM_CLASSES} classes...")
+        model = LSTM_Gesture_Network(num_classes=NUM_CLASSES).to(device)
         save_filename = "best_lstm_model.pth"
     elif choice == '2':
-        print("Initializing SRDST Adapted Model...")
-        model = SRDST_Adapted_Network(num_classes=12).to(device)
+        print(f"Initializing SRDST Adapted Model for {NUM_CLASSES} classes...")
+        model = SRDST_Adapted_Network(num_classes=NUM_CLASSES).to(device)
         save_filename = "best_srdst_model.pth"
     else:
         if choice != '1':
             print("Invalid input. Defaulting to FMCW Lightweight Model...")
-        else:
-            print("Initializing FMCW Lightweight Model...")
-        model = GestureRecognitionNetwork(num_classes=12).to(device)
+        print(f"Initializing FMCW Lightweight Model for {NUM_CLASSES} classes...")
+        model = GestureRecognitionNetwork(num_classes=NUM_CLASSES).to(device)
         save_filename = "best_fmcw_model.pth"
 
-    # --- 2. Hyperparameters ---
+    # --- 3. Hyperparameters ---
     num_epochs = 100
     learning_rate = 0.001
     batch_size = 16
 
-    # --- 3. Load and Split the Dataset ---
-    print("\nLoading dataset...")
-    full_dataset = RadarGestureDataset(data_dir="Data", seq_length=40)
-    labels = [sample[1] for sample in full_dataset.samples]
-    
+    # --- 4. Split the Dataset ---
     # 6:2:2 Stratified Split
     train_idx, temp_idx = train_test_split(range(len(full_dataset)), test_size=0.4, stratify=labels, random_state=42)
     temp_labels = [labels[i] for i in temp_idx]
@@ -68,11 +72,11 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    # --- 4. Loss and Optimizer ---
+    # --- 5. Loss and Optimizer ---
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     
-    # --- 5. Training Loop ---
+    # --- 6. Training Loop ---
     best_val_acc = 0.0
     print("\nStarting Training...")
     
@@ -82,11 +86,22 @@ def main():
         train_loss, correct_train, total_train = 0.0, 0, 0
         
         loop = tqdm(train_loader, desc=f"Epoch [{epoch+1}/{num_epochs}] Train", leave=False)
-        for range_seq, vel_seq, az_seq, batch_labels in loop:
-            range_seq, vel_seq, az_seq, batch_labels = range_seq.to(device), vel_seq.to(device), az_seq.to(device), batch_labels.to(device)
-            
+        for range_seq, vel_seq, az_seq, el_seq, batch_labels in loop:
+            range_seq = range_seq.to(device)
+            vel_seq = vel_seq.to(device)
+            az_seq = az_seq.to(device)
+            el_seq = el_seq.to(device)
+            batch_labels = batch_labels.to(device)
+
             optimizer.zero_grad()
-            outputs = model(range_seq, vel_seq, az_seq)
+            
+            # SAFETY CATCH: Only the TCN (choice 1) was updated for 4 inputs
+            if choice == '1' or choice not in ['2', '3']:
+                outputs = model(range_seq, vel_seq, az_seq, el_seq)
+            else:
+                # If using older unpatched models, just pass the original 3 features
+                outputs = model(range_seq, vel_seq, az_seq)
+                
             loss = criterion(outputs, batch_labels)
             
             loss.backward()
@@ -107,10 +122,18 @@ def main():
         val_loss, correct_val, total_val = 0.0, 0, 0
         
         with torch.no_grad():
-            for range_seq, vel_seq, az_seq, batch_labels in val_loader:
-                range_seq, vel_seq, az_seq, batch_labels = range_seq.to(device), vel_seq.to(device), az_seq.to(device), batch_labels.to(device)
+            for range_seq, vel_seq, az_seq, el_seq, batch_labels in val_loader:
+                range_seq = range_seq.to(device)
+                vel_seq = vel_seq.to(device)
+                az_seq = az_seq.to(device)
+                el_seq = el_seq.to(device)
+                batch_labels = batch_labels.to(device)
                 
-                outputs = model(range_seq, vel_seq, az_seq)
+                if choice == '1' or choice not in ['2', '3']:
+                    outputs = model(range_seq, vel_seq, az_seq, el_seq)
+                else:
+                    outputs = model(range_seq, vel_seq, az_seq)
+                    
                 loss = criterion(outputs, batch_labels)
                 
                 val_loss += loss.item()
