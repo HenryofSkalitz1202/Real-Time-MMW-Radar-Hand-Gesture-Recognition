@@ -59,10 +59,13 @@ def main():
     batch_size = 16
 
     # --- 4. Split the Dataset ---
-    # 6:2:2 Stratified Split
-    train_idx, temp_idx = train_test_split(range(len(full_dataset)), test_size=0.4, stratify=labels, random_state=42)
-    temp_labels = [labels[i] for i in temp_idx]
-    val_idx, test_idx = train_test_split(temp_idx, test_size=0.5, stratify=temp_labels, random_state=42)
+    # 80:20 Stratified Split (Train and Validation Only)
+    train_idx, val_idx = train_test_split(
+        range(len(full_dataset)), 
+        test_size=0.2, 
+        stratify=labels, 
+        random_state=42
+    )
     
     train_dataset = Subset(full_dataset, train_idx)
     val_dataset = Subset(full_dataset, val_idx)
