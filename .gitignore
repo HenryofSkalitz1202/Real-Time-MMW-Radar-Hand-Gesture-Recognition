@@ -1,3 +1,5 @@
 ref_data
 data
 model
+__pycache__
+*.pth
