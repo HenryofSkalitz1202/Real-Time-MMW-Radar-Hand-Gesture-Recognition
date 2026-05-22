@@ -159,7 +159,7 @@ class GestureRecognitionNetwork(nn.Module):
         self.fusion_block1 = DS_CA_Block(in_channels=64, out_channels=128)
         self.fusion_block2 = DS_CA_Block(in_channels=128, out_channels=128)
         
-        self.dropout = nn.Dropout(0.3)
+        self.dropout = nn.Dropout(0.5)
         
         # After two MaxPool1d(2) operations, your 40-frame sequence becomes 10 frames long.
         # Flattened size: 128 channels * 10 frames = 1280

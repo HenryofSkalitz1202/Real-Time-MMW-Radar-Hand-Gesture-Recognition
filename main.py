@@ -41,17 +41,17 @@ def main():
     if choice == '3':
         print(f"Initializing LSTM Model for {NUM_CLASSES} classes...")
         model = LSTM_Gesture_Network(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_lstm_model.pth"
+        save_filename = "best_lstm_model_v2.pth"
     elif choice == '2':
         print(f"Initializing SRDST Adapted Model for {NUM_CLASSES} classes...")
         model = SRDST_Adapted_Network(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_srdst_model.pth"
+        save_filename = "best_srdst_model_v2.pth"
     else:
         if choice != '1':
             print("Invalid input. Defaulting to FMCW Lightweight Model...")
         print(f"Initializing FMCW Lightweight Model for {NUM_CLASSES} classes...")
         model = GestureRecognitionNetwork(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_fmcw_model.pth"
+        save_filename = "best_fmcw_model_v2.pth"
 
     # --- 3. Hyperparameters ---
     num_epochs = 100
@@ -77,7 +77,7 @@ def main():
 
     # --- 5. Loss and Optimizer ---
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     
     # --- 6. Training Loop ---
     best_val_acc = 0.0
@@ -95,6 +95,22 @@ def main():
             az_seq = az_seq.to(device)
             el_seq = el_seq.to(device)
             batch_labels = batch_labels.to(device)
+
+            # --- DATA AUGMENTATION (Training Only) ---
+            # 1. Inject random Gaussian noise (Simulates slightly different hand speeds/angles)
+            noise_level = 0.05
+            range_seq = range_seq + torch.randn_like(range_seq) * noise_level
+            vel_seq = vel_seq + torch.randn_like(vel_seq) * noise_level
+            az_seq = az_seq + torch.randn_like(az_seq) * noise_level
+            el_seq = el_seq + torch.randn_like(el_seq) * noise_level
+            
+            # 2. Random Time-Shifting (Simulates starting the gesture earlier or later)
+            shift = torch.randint(-2, 3, (1,)).item() # Shift between -2 and +2 frames
+            range_seq = torch.roll(range_seq, shifts=shift, dims=2)
+            vel_seq = torch.roll(vel_seq, shifts=shift, dims=2)
+            az_seq = torch.roll(az_seq, shifts=shift, dims=2)
+            el_seq = torch.roll(el_seq, shifts=shift, dims=2)
+            # -----------------------------------------
 
             optimizer.zero_grad()
             
@@ -155,6 +171,50 @@ def main():
             print(f"  -> Saved new best model to {save_filename}!")
 
     print(f"\nTraining Finished! Best Validation Accuracy: {best_val_acc:.2f}%")
+
+    # ==========================================
+    # DEBUGGING: Post-Training Confusion Matrix
+    # ==========================================
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from sklearn.metrics import confusion_matrix
+
+    print("\n--- Generating Debug Confusion Matrix ---")
+    # Load the best weights we just saved
+    model.load_state_dict(torch.load(save_filename))
+    model.eval()
+    
+    all_preds = []
+    all_trues = []
+    
+    with torch.no_grad():
+        for range_seq, vel_seq, az_seq, el_seq, batch_labels in val_loader:
+            range_seq = range_seq.to(device)
+            vel_seq = vel_seq.to(device)
+            az_seq = az_seq.to(device)
+            el_seq = el_seq.to(device)
+            
+            outputs = model(range_seq, vel_seq, az_seq, el_seq)
+            _, predicted = torch.max(outputs.data, 1)
+            
+            all_preds.extend(predicted.cpu().numpy())
+            all_trues.extend(batch_labels.cpu().numpy())
+            
+    cm = confusion_matrix(all_trues, all_preds)
+    plt.figure(figsize=(10, 8))
+    
+    # Normalize by row to get percentages
+    cm_normalized = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-9)
+    
+    sns.heatmap(cm_normalized, annot=True, fmt=".2f", cmap="Blues", 
+                xticklabels=full_dataset.classes, yticklabels=full_dataset.classes)
+    plt.title("Validation Confusion Matrix (Debug)")
+    plt.ylabel("True Gesture")
+    plt.xlabel("Predicted Gesture")
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.savefig("debug_confusion_matrix.png", dpi=300)
+    print("Saved 'debug_confusion_matrix.png'. Please review it!")
 
 if __name__ == "__main__":
     main()
