@@ -120,8 +120,9 @@ class ImageUpdateThread(QThread):
         else:
             print(f"❌ ERROR: Model weights not found at {model_path}")
 
-        # Buffers for the 3 TCN branches
-        self.r_buf, self.v_buf, self.a_buf = [], [], []
+        # Buffers for the 4 TCN branches
+        # r_buf = Range, v_buf = Velocity/Doppler, a_buf = Azimuth, e_buf = Elevation
+        self.r_buf, self.v_buf, self.a_buf, self.e_buf = [], [], [], []
         self.prev_cube = None
 
         # Map your folder names here
@@ -144,15 +145,16 @@ class ImageUpdateThread(QThread):
 
         # 4. Extract the top M peaks from the masked, log-scaled data
         flat_indices = np.argsort(masked_cube.flatten())[-M:]
-        r_idx, d_idx, az_idx, _ = np.unravel_index(flat_indices, masked_cube.shape)
+        r_idx, d_idx, az_idx, el_idx = np.unravel_index(flat_indices, masked_cube.shape)
         
         # 5. DOMAIN HACK MULTIPLIERS (BGT60TR13C 2m Config to AWR1642 approximation)
         r_vals = r_idx * 0.03 
         # Multiply by 1.5 to artificially boost the Doppler magnitude to match 77GHz thresholds
         v_vals = (d_idx - 30) * 0.039 * 1.5 
         az_vals = (az_idx / 15.0) * (np.pi * 120 / 180) - (np.pi * 60 / 180)
+        el_vals = (el_idx / 15.0) * (np.pi * 120 / 180) - (np.pi * 60 / 180)
         
-        return np.mean(r_vals), np.mean(v_vals), np.mean(az_vals)
+        return np.mean(r_vals), np.mean(v_vals), np.mean(az_vals), np.mean(el_vals)
 
     def run(self):
         # 1. Setup Socket
@@ -176,20 +178,22 @@ class ImageUpdateThread(QThread):
                     
                     if max_energy > self.noise_threshold:
                         # ACTIVE MOTION: Extract physical features
-                        r, v, a = self.extract_rve_features(diff_cube)
+                        r, v, a, e = self.extract_rve_features(diff_cube)
                     else:
                         # STILLNESS: Feed zeros to the model to represent "resting" state
-                        r, v, a = 0.0, 0.0, 0.0
+                        r, v, a, e = 0.0, 0.0, 0.0, 0.0
 
                     # Buffer Management (Sliding window of 40 frames)
                     self.r_buf.append(r)
                     self.v_buf.append(v)
                     self.a_buf.append(a)
-                    
+                    self.e_buf.append(e)
+
                     if len(self.r_buf) > 40:
                         self.r_buf.pop(0)
                         self.v_buf.pop(0)
                         self.a_buf.pop(0)
+                        self.e_buf.pop(0)
 
                     # Inference Block (When buffer is full)
                     if len(self.r_buf) == 40:
@@ -197,18 +201,13 @@ class ImageUpdateThread(QThread):
                         rt_raw = torch.FloatTensor(self.r_buf)
                         vt_raw = torch.FloatTensor(self.v_buf)
                         at_raw = torch.FloatTensor(self.a_buf)
+                        et_raw = torch.FloatTensor(self.e_buf)
 
-                        # --- THE DOMAIN SHIFT HACK (Z-Score Normalization) ---
-                        # Forces the live sequence to have a mean of 0 and std of 1
-                        def normalize_sequence(tensor):
-                            t_mean = tensor.mean()
-                            t_std = tensor.std()
-                            # Add 1e-8 to prevent dividing by zero if the hand is perfectly still
-                            return (tensor - t_mean) / (t_std + 1e-8)
-
-                        rt = normalize_sequence(rt_raw).view(1, 1, 40).to(self.device)
-                        vt = normalize_sequence(vt_raw).view(1, 1, 40).to(self.device)
-                        at = normalize_sequence(at_raw).view(1, 1, 40).to(self.device)
+                        # Apply identical Global Min-Max Scaling
+                        rt = (rt_raw / 1.0).view(1, 1, 40).to(self.device)
+                        vt = (vt_raw / 2.0).view(1, 1, 40).to(self.device)
+                        at = (at_raw / 1.57).view(1, 1, 40).to(self.device)
+                        et = (et_raw / 1.57).view(1, 1, 40).to(self.device)
 
                         # DEBUG Console output
                         if max_energy > self.noise_threshold:
@@ -219,7 +218,7 @@ class ImageUpdateThread(QThread):
                                 print("STILLNESS: Noise floor reached.")
 
                         with torch.no_grad():
-                            logits = self.model(rt, vt, at)
+                            logits = self.model(rt, vt, at, et)
                             probs = torch.softmax(logits, dim=1)
                             conf, idx = torch.max(probs, dim=1)
                             

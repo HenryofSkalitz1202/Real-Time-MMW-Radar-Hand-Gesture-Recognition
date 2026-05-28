@@ -35,11 +35,12 @@ def process_csv_to_tensor(file_path, seq_length=40, M=7):
         # 2. Extract Representative Values (Top M points per frame)
         def process_frame(frame_data):
             top_m = frame_data.sort_values(by='PeakValue', ascending=False).head(M)
+
             return pd.Series({
                 'Range': top_m['Range'].mean(),
                 'Velocity': top_m['Velocity'].mean(),
                 'Azimuth': top_m['Azimuth'].mean(),
-                'Elevation': top_m['Elevation'].mean() # Added Elevation to the mean pooling
+                'Elevation': top_m['Elevation'].mean()
             })
             
         frames = df.groupby('FrameNumber').apply(process_frame).reset_index(drop=True)
@@ -53,6 +54,14 @@ def process_csv_to_tensor(file_path, seq_length=40, M=7):
             
         # 4. Return as numpy array with shape (4 Features, 40 Frames)
         feature_matrix = frames[['Range', 'Velocity', 'Azimuth', 'Elevation']].values.T
+
+        # --- GLOBAL MIN-MAX SCALING ---
+        # Preserves physical aspect ratios and absolute gesture sizes
+        # feature_matrix[0, :] = feature_matrix[0, :] / 1.0   # Range (0 to 1.0m)
+        # feature_matrix[1, :] = feature_matrix[1, :] / 2.0   # Velocity (+/- 2.0 m/s)
+        # feature_matrix[2, :] = feature_matrix[2, :] / 1.57  # Azimuth (+/- pi/2 rads)
+        # feature_matrix[3, :] = feature_matrix[3, :] / 1.57  # Elevation (+/- pi/2 rads
+
         return feature_matrix.astype(np.float32)
         
     except Exception as e:

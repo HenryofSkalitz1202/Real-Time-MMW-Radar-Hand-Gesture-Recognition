@@ -1,5 +1,6 @@
 ref_data
 data
+rest
 model
 __pycache__
 *.pth

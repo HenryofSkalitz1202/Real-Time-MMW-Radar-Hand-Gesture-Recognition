@@ -7,6 +7,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
+import numpy as np
 
 from dataset import RadarGestureDataset
 from model.one_d_tcn import GestureRecognitionNetwork 
@@ -30,6 +31,12 @@ def main():
     NUM_CLASSES = len(full_dataset.classes)
     print(f"Detected {NUM_CLASSES} classes: {full_dataset.classes}")
 
+    REST_INDEX = full_dataset.class_to_idx.get("rest", -1)
+    if REST_INDEX != -1:
+        print(f"Found 'Rest' class at index {REST_INDEX}. Will exclude from noise augmentation.")
+    else:
+        print("Warning: No 'Rest' class found. All classes will receive noise augmentation.")
+
     # --- 2. Model Selection UI ---
     print("\nAvailable Models:")
     print("1: FMCW Lightweight (DS-TCN + ECA) [UPDATED FOR 4 INPUTS]")
@@ -41,17 +48,17 @@ def main():
     if choice == '3':
         print(f"Initializing LSTM Model for {NUM_CLASSES} classes...")
         model = LSTM_Gesture_Network(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_lstm_model_v2.pth"
+        save_filename = "best_lstm_model_v4.pth"
     elif choice == '2':
         print(f"Initializing SRDST Adapted Model for {NUM_CLASSES} classes...")
         model = SRDST_Adapted_Network(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_srdst_model_v2.pth"
+        save_filename = "best_srdst_model_v4.pth"
     else:
         if choice != '1':
             print("Invalid input. Defaulting to FMCW Lightweight Model...")
         print(f"Initializing FMCW Lightweight Model for {NUM_CLASSES} classes...")
         model = GestureRecognitionNetwork(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_fmcw_model_v2.pth"
+        save_filename = "best_fmcw_model_v5.pth"
 
     # --- 3. Hyperparameters ---
     num_epochs = 100
@@ -82,7 +89,7 @@ def main():
     # --- 6. Training Loop ---
     best_val_acc = 0.0
     print("\nStarting Training...")
-    
+
     for epoch in range(num_epochs):
         # -- Train Phase --
         model.train()
@@ -97,19 +104,25 @@ def main():
             batch_labels = batch_labels.to(device)
 
             # --- DATA AUGMENTATION (Training Only) ---
+            # Alphabetical indices: hand_away(0), hand_towards(1), rest(2), swipe_down(3), swipe_left(4), swipe_right(5), swipe_up(6)
+            
+            # Create a mask to PREVENT augmenting the 'rest' class (index 2)
+            # This ensures perfect stillness remains perfectly still
+            mask = (batch_labels != REST_INDEX).view(-1, 1, 1).float()
+
             # 1. Inject random Gaussian noise (Simulates slightly different hand speeds/angles)
             noise_level = 0.05
-            range_seq = range_seq + torch.randn_like(range_seq) * noise_level
-            vel_seq = vel_seq + torch.randn_like(vel_seq) * noise_level
-            az_seq = az_seq + torch.randn_like(az_seq) * noise_level
-            el_seq = el_seq + torch.randn_like(el_seq) * noise_level
+            range_seq = range_seq + (torch.randn_like(range_seq) * noise_level * mask)
+            vel_seq = vel_seq + (torch.randn_like(vel_seq) * noise_level * mask)
+            az_seq = az_seq + (torch.randn_like(az_seq) * noise_level * mask)
+            el_seq = el_seq + (torch.randn_like(el_seq) * noise_level * mask)
             
             # 2. Random Time-Shifting (Simulates starting the gesture earlier or later)
-            shift = torch.randint(-2, 3, (1,)).item() # Shift between -2 and +2 frames
-            range_seq = torch.roll(range_seq, shifts=shift, dims=2)
-            vel_seq = torch.roll(vel_seq, shifts=shift, dims=2)
-            az_seq = torch.roll(az_seq, shifts=shift, dims=2)
-            el_seq = torch.roll(el_seq, shifts=shift, dims=2)
+            # shift = torch.randint(-2, 3, (1,)).item() # Shift between -2 and +2 frames
+            # range_seq = torch.roll(range_seq, shifts=shift, dims=2)
+            # vel_seq = torch.roll(vel_seq, shifts=shift, dims=2)
+            # az_seq = torch.roll(az_seq, shifts=shift, dims=2)
+            # el_seq = torch.roll(el_seq, shifts=shift, dims=2)
             # -----------------------------------------
 
             optimizer.zero_grad()
