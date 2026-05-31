@@ -3,7 +3,7 @@ import numpy as np
 
 ## RVE: Representative Value Extraction
 
-def process_csv_to_tensor(file_path, seq_length=40, M=20):
+def process_csv_to_tensor(file_path, seq_length=40, M=7):
     """
     Reads a raw gesture CSV and converts it to a (4, seq_length) feature matrix.
     Output Order: [Range, Velocity, Azimuth, Elevation]
@@ -35,16 +35,27 @@ def process_csv_to_tensor(file_path, seq_length=40, M=20):
         # 2. Extract Representative Values (Top M points per frame)
         def process_frame(frame_data):
             top_m = frame_data.sort_values(by='PeakValue', ascending=False).head(M)
+            weights = top_m['PeakValue'].values + 1e-9 
 
-            # Extract the raw power values to use as gravity/weights
-            weights = top_m['PeakValue'].values + 1e-9 # Add epsilon to prevent div by zero
+            r = np.average(top_m['Range'], weights=weights)
+            v = np.average(top_m['Velocity'], weights=weights)
+            
+            # --- CRITICAL RECONSTRUCTION ---
+            # We must convert the Cartesian x/y/z back to radians for the neural network!
+            x = np.average(top_m['x'], weights=weights)
+            y = np.average(top_m['y'], weights=weights)
+            z = np.average(top_m['z'], weights=weights)
+            
+            # Azimuth = arcsin(x / r)
+            # Elevation = arcsin(z / r)
+            az = np.arcsin(np.clip(x / (r + 1e-9), -1.0, 1.0))
+            el = np.arcsin(np.clip(z / (r + 1e-9), -1.0, 1.0))
 
             return pd.Series({
-                # Calculate the Weighted Average (Center of Mass)
-                'Range': np.average(top_m['Range'], weights=weights),
-                'Velocity': np.average(top_m['Velocity'], weights=weights),
-                'Azimuth': np.average(top_m['Azimuth'], weights=weights),
-                'Elevation': np.average(top_m['Elevation'], weights=weights)
+                'Range': r,
+                'Velocity': v,
+                'Azimuth': az,
+                'Elevation': el
             })
             
         frames = df.groupby('FrameNumber').apply(process_frame).reset_index(drop=True)

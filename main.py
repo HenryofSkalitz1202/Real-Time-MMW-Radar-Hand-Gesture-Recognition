@@ -24,7 +24,7 @@ def main():
 
     # --- 1. Load Dataset FIRST to dynamically get num_classes ---
     print("\nLoading dataset...")
-    # Make sure "Data" is the folder containing your 7 new gesture classes
+    # Make sure "Data" is the folder containing your gesture classes
     full_dataset = RadarGestureDataset(data_dir="Data", seq_length=40)
     labels = [sample[1] for sample in full_dataset.samples]
     
@@ -41,27 +41,30 @@ def main():
     print("\nAvailable Models:")
     print("1: FMCW Lightweight (DS-TCN + ECA) [UPDATED FOR 4 INPUTS]")
     print("2: SRDST Adapted (Dual-Stream Transformer) [REQUIRES 3 INPUTS]")
-    print("3: LSTM (Grobelny & Narbudowicz) [REQUIRES 3 INPUTS]")
+    print("3: LSTM (Grobelny & Narbudowicz) [UPDATED FOR 4 INPUTS]")
     
     choice = input("Enter the number of the model to train (1, 2, or 3): ").strip()
 
     if choice == '3':
         print(f"Initializing LSTM Model for {NUM_CLASSES} classes...")
         model = LSTM_Gesture_Network(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_lstm_model_v4.pth"
+        save_filename = "best_lstm_model_v5.pth"
+        model_name = "LSTM"
     elif choice == '2':
         print(f"Initializing SRDST Adapted Model for {NUM_CLASSES} classes...")
         model = SRDST_Adapted_Network(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_srdst_model_v4.pth"
+        save_filename = "best_srdst_model_v5.pth"
+        model_name = "SRDST"
     else:
         if choice != '1':
             print("Invalid input. Defaulting to FMCW Lightweight Model...")
         print(f"Initializing FMCW Lightweight Model for {NUM_CLASSES} classes...")
         model = GestureRecognitionNetwork(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_fmcw_model_v6.pth"
+        save_filename = "best_fmcw_model_v7.pth"
+        model_name = "TCN"
 
     # --- 3. Hyperparameters ---
-    num_epochs = 80
+    num_epochs = 100
     learning_rate = 0.001
     batch_size = 16
 
@@ -105,23 +108,21 @@ def main():
             batch_labels = batch_labels.to(device)
 
             # --- DATA AUGMENTATION (Training Only) ---
-            # 1. Amplitude Scaling (Simulates distance variations)
-            # Multiplies the whole sequence by a random factor between 0.8 and 1.2
+            # 1. Amplitude Scaling
             scale = torch.empty(batch_labels.size(0), 1, 1, device=device).uniform_(0.8, 1.2)
             range_seq = range_seq * scale
             vel_seq = vel_seq * scale
             az_seq = az_seq * scale
             el_seq = el_seq * scale
 
-            # 2. Gaussian Noise (Keep your existing noise, but 0.02 is good)
+            # 2. Gaussian Noise
             noise_level = 0.02
             range_seq = range_seq + (torch.randn_like(range_seq) * noise_level)
             vel_seq = vel_seq + (torch.randn_like(vel_seq) * noise_level)
             az_seq = az_seq + (torch.randn_like(az_seq) * noise_level)
             el_seq = el_seq + (torch.randn_like(el_seq) * noise_level)
 
-            # 3. Temporal Shifting (Crucial for Time-Series)
-            # Randomly shift the gesture forward or backward by up to 4 frames
+            # 3. Temporal Shifting
             shift = torch.randint(-4, 5, (1,)).item()
             if shift != 0:
                 range_seq = torch.roll(range_seq, shifts=shift, dims=2)
@@ -132,11 +133,10 @@ def main():
 
             optimizer.zero_grad()
             
-            # SAFETY CATCH: Only the TCN (choice 1) was updated for 4 inputs
-            if choice == '1' or choice not in ['2', '3']:
+            # ---> SAFETY CATCH: Both TCN (1) and LSTM (3) now take 4 inputs
+            if choice in ['1', '3'] or choice not in ['1', '2', '3']:
                 outputs = model(range_seq, vel_seq, az_seq, el_seq)
             else:
-                # If using older unpatched models, just pass the original 3 features
                 outputs = model(range_seq, vel_seq, az_seq)
                 
             loss = criterion(outputs, batch_labels)
@@ -168,7 +168,8 @@ def main():
                 el_seq = el_seq.to(device)
                 batch_labels = batch_labels.to(device)
                 
-                if choice == '1' or choice not in ['2', '3']:
+                # ---> SAFETY CATCH: Validation Phase
+                if choice in ['1', '3'] or choice not in ['1', '2', '3']:
                     outputs = model(range_seq, vel_seq, az_seq, el_seq)
                 else:
                     outputs = model(range_seq, vel_seq, az_seq)
@@ -199,8 +200,7 @@ def main():
     import seaborn as sns
     from sklearn.metrics import confusion_matrix
 
-    print("\n--- Generating Debug Confusion Matrix ---")
-    # Load the best weights we just saved
+    print(f"\n--- Generating Debug Confusion Matrix for {model_name} ---")
     model.load_state_dict(torch.load(save_filename))
     model.eval()
     
@@ -214,7 +214,12 @@ def main():
             az_seq = az_seq.to(device)
             el_seq = el_seq.to(device)
             
-            outputs = model(range_seq, vel_seq, az_seq, el_seq)
+            # ---> SAFETY CATCH: Confusion Matrix Phase
+            if choice in ['1', '3'] or choice not in ['1', '2', '3']:
+                outputs = model(range_seq, vel_seq, az_seq, el_seq)
+            else:
+                outputs = model(range_seq, vel_seq, az_seq)
+                
             _, predicted = torch.max(outputs.data, 1)
             
             all_preds.extend(predicted.cpu().numpy())
@@ -228,13 +233,16 @@ def main():
     
     sns.heatmap(cm_normalized, annot=True, fmt=".2f", cmap="Blues", 
                 xticklabels=full_dataset.classes, yticklabels=full_dataset.classes)
-    plt.title("Validation Confusion Matrix (Debug)")
+    plt.title(f"Validation Confusion Matrix ({model_name})")
     plt.ylabel("True Gesture")
     plt.xlabel("Predicted Gesture")
     plt.xticks(rotation=45, ha='right')
     plt.tight_layout()
-    plt.savefig("debug_confusion_matrix.png", dpi=300)
-    print("Saved 'debug_confusion_matrix.png'. Please review it!")
+    
+    # ---> DYNAMIC FILENAME: Saves as debug_confusion_matrix_TCN.png or _LSTM.png
+    cm_filename = f"debug_confusion_matrix_{model_name}.png"
+    plt.savefig(cm_filename, dpi=300)
+    print(f"Saved '{cm_filename}'. Please review it!")
 
 if __name__ == "__main__":
     main()

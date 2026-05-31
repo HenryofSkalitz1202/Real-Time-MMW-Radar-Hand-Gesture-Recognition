@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 class LSTM_Gesture_Network(nn.Module):
-    def __init__(self, input_size=3, hidden_size=32, num_layers=2, num_classes=12):
+    def __init__(self, input_size=4, hidden_size=32, num_layers=2, num_classes=4):
         super().__init__()
         
         # Based on the paper: 2 hidden layers with 32 neurons each.
@@ -18,13 +18,13 @@ class LSTM_Gesture_Network(nn.Module):
         # The final fully connected layer maps the hidden state to the gesture classes
         self.fc = nn.Linear(hidden_size, num_classes)
 
-    def forward(self, range_seq, vel_seq, az_seq):
-        # 1. Combine your 3 feature branches into a single tensor
-        # Shape: [batch, 3, 40]
-        x = torch.cat([range_seq, vel_seq, az_seq], dim=1)
+    def forward(self, range_seq, vel_seq, az_seq, el_seq):
+        # 1. Combine your 4 feature branches into a single tensor
+        # Shape: [batch, 4, 40]
+        x = torch.cat([range_seq, vel_seq, az_seq, el_seq], dim=1)
         
         # 2. Transpose to match LSTM requirements
-        # Shape becomes: [batch, 40, 3] (Batch, Sequence_Length, Features)
+        # Shape becomes: [batch, 40, 4] (Batch, Sequence_Length, Features)
         x = x.transpose(1, 2)
         
         # 3. Pass through the LSTM

@@ -22,92 +22,121 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:, :x.size(1), :]
         return x
 
-# --- 2. Single Transformer Stream ---
-class TransformerStream(nn.Module):
-    """A single branch of the Dual-Stream architecture."""
-    def __init__(self, input_dim, d_model=32, nhead=4, num_layers=2, dim_feedforward=128, dropout=0.1):
+# --- 2. The Complete SRDST Architecture ---
+class SRDST_Adapted_Network(nn.Module):
+    def __init__(self, num_classes=4, seq_len=40, num_channels=4, d_model=32, nhead=4, num_layers=2, dim_feedforward=128, dropout=0.1):
         super().__init__()
-        # Project our small input dimensions (1 or 2) up to the Transformer's working dimension
-        self.input_proj = nn.Linear(input_dim, d_model)
-        self.pos_encoder = PositionalEncoding(d_model)
         
-        # Standard PyTorch Transformer Encoder
-        encoder_layers = nn.TransformerEncoderLayer(
-            d_model=d_model, nhead=nhead, 
-            dim_feedforward=dim_feedforward, 
+        # ==========================================
+        # STREAM 1: Time Dimension Encoder
+        # Extracts temporal correlations across frames
+        # ==========================================
+        self.time_embedding = nn.Linear(num_channels, d_model)
+        self.pos_encoder = PositionalEncoding(d_model, max_len=seq_len)
+        
+        time_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, 
             dropout=dropout, batch_first=True
         )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
+        self.time_transformer = nn.TransformerEncoder(time_encoder_layer, num_layers=num_layers)
+        
+        # ==========================================
+        # STREAM 2: Channel Dimension Encoder
+        # Extracts correlations between physical variables
+        # ==========================================
+        self.channel_embedding = nn.Linear(seq_len, d_model)
+        # No positional encoding is used here as per Jin et al.
+        
+        channel_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, 
+            dropout=dropout, batch_first=True
+        )
+        self.channel_transformer = nn.TransformerEncoder(channel_encoder_layer, num_layers=num_layers)
+        
+        # ==========================================
+        # FUSION LAYER MODULE
+        # ==========================================
+        # Flattened dimensions
+        self.flat_time_dim = seq_len * d_model         # 40 * 32 = 1280
+        self.flat_channel_dim = num_channels * d_model # 4 * 32 = 128
+        self.concat_dim = self.flat_time_dim + self.flat_channel_dim # 1408
+        
+        # Weights generation network: (wc, wt) = FC[Concat(Flatten(Y_c), Flatten(Y_t))]
+        self.weight_fc = nn.Sequential(
+            nn.Linear(self.concat_dim, 32),
+            nn.ReLU(),
+            nn.Linear(32, 2),
+            nn.Softmax(dim=1) # Yields two weights that sum to 1
+        )
+        
+        # Final Classification Network
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.3),
+            nn.Linear(self.concat_dim, num_classes)
+        )
 
-    def forward(self, src):
-        # 1. Project to d_model space
-        x = self.input_proj(src)
-        # 2. Add positional context
-        x = self.pos_encoder(x)
-        # 3. Pass through self-attention layers
-        x = self.transformer_encoder(x)
-        return x
-
-# --- 3. The Complete SRDST-Adapted Architecture ---
-class SRDST_Adapted_Network(nn.Module):
-    def __init__(self, num_classes=12):
-        super().__init__()
+    def forward(self, range_seq, vel_seq, az_seq, el_seq):
+        # 1. Combine 4 features -> Shape: [batch, 4, 40]
+        x = torch.cat([range_seq, vel_seq, az_seq, el_seq], dim=1)
         
-        # Stream 1: Spatial Trajectory (Range, Azimuth -> 2 features)
-        self.spatial_stream = TransformerStream(input_dim=2, d_model=32, nhead=4, num_layers=2)
+        # ---------------------------------------------
+        # Branch A: Time Dimension
+        # ---------------------------------------------
+        # Transpose to [batch, 40, 4] so sequence length is 40
+        x_time = x.transpose(1, 2)
         
-        # Stream 2: Motion Dynamics (Velocity -> 1 feature)
-        self.motion_stream = TransformerStream(input_dim=1, d_model=32, nhead=4, num_layers=2)
+        y_t = self.time_embedding(x_time)
+        y_t = self.pos_encoder(y_t)
+        y_t = self.time_transformer(y_t)
+        y_t_flat = torch.flatten(y_t, start_dim=1) # Shape: [batch, 1280]
         
-        # Feature Fusion & Classification
-        # 32 dims from spatial + 32 dims from motion = 64
-        self.fc1 = nn.Linear(64, 64)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(0.3)
-        self.classifier = nn.Linear(64, num_classes)
-
-    def forward(self, range_seq, vel_seq, az_seq):
-        """
-        Input shapes from your DataLoader: [batch_size, 1, 40]
-        Transformers expect: [batch_size, seq_len, features]
-        """
-        # 1. Prepare and reshape inputs for the Transformers
-        # Spatial: Combine Range and Azimuth, then swap dimensions -> [batch_size, 40, 2]
-        spatial_in = torch.cat([range_seq, az_seq], dim=1).transpose(1, 2)
+        # ---------------------------------------------
+        # Branch B: Channel Dimension
+        # ---------------------------------------------
+        # Keep as [batch, 4, 40] so sequence length is 4 (channels)
+        x_channel = x
         
-        # Motion: Just swap dimensions -> [batch_size, 40, 1]
-        motion_in = vel_seq.transpose(1, 2)
+        y_c = self.channel_embedding(x_channel)
+        # (No positional encoding)
+        y_c = self.channel_transformer(y_c)
+        y_c_flat = torch.flatten(y_c, start_dim=1) # Shape: [batch, 128]
         
-        # 2. Pass through Dual-Stream Transformers
-        out_spatial = self.spatial_stream(spatial_in) # Shape: [batch, 40, 32]
-        out_motion = self.motion_stream(motion_in)    # Shape: [batch, 40, 32]
+        # ---------------------------------------------
+        # Weighted Fusion
+        # ---------------------------------------------
+        # Concatenate for weight calculation
+        concat_flat = torch.cat([y_c_flat, y_t_flat], dim=1) # Shape: [batch, 1408]
         
-        # 3. Global Average Pooling (Collapse the 40 frames into a single rich feature vector)
-        pooled_spatial = out_spatial.mean(dim=1) # Shape: [batch, 32]
-        pooled_motion = out_motion.mean(dim=1)   # Shape: [batch, 32]
+        # Generate weights
+        weights = self.weight_fc(concat_flat)
+        w_c = weights[:, 0].unsqueeze(1) # Shape: [batch, 1]
+        w_t = weights[:, 1].unsqueeze(1) # Shape: [batch, 1]
         
-        # 4. Concatenate streams
-        fused_features = torch.cat((pooled_spatial, pooled_motion), dim=1) # Shape: [batch, 64]
+        # Apply weights to the respective flattened feature vectors
+        weighted_y_c = y_c_flat * w_c
+        weighted_y_t = y_t_flat * w_t
         
-        # 5. Classification
-        x = self.fc1(fused_features)
-        x = self.relu(x)
-        x = self.dropout(x)
-        logits = self.classifier(x)
+        # ---------------------------------------------
+        # Classification
+        # ---------------------------------------------
+        # Re-concatenate the weighted features
+        weighted_concat = torch.cat([weighted_y_c, weighted_y_t], dim=1)
         
+        logits = self.classifier(weighted_concat)
         return logits
 
 # --- Quick Parameter Check (Optional) ---
 if __name__ == "__main__":
     from thop import profile, clever_format
-    model = SRDST_Adapted_Network(num_classes=12)
+    model = SRDST_Adapted_Network(num_classes=4)
     
-    # Dummy inputs representing your DataLoader outputs
+    # Dummy inputs representing DataLoader outputs [batch_size, 1, 40]
     dummy_r = torch.randn(1, 1, 40)
     dummy_v = torch.randn(1, 1, 40)
     dummy_a = torch.randn(1, 1, 40)
+    dummy_e = torch.randn(1, 1, 40)
     
-    macs, params = profile(model, inputs=(dummy_r, dummy_v, dummy_a), verbose=False)
+    macs, params = profile(model, inputs=(dummy_r, dummy_v, dummy_a, dummy_e), verbose=False)
     macs, params = clever_format([macs, params], "%.2f")
     
     print(f"SRDST Adapted Parameters: {params}")
