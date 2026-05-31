@@ -111,7 +111,9 @@ class ImageUpdateThread(QThread):
                 
         # ML Inference Setup
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model = GestureRecognitionNetwork(num_classes=12).to(self.device)
+        
+        # ---> CHANGED: Updated num_classes to 4 to match the new pivot
+        self.model = GestureRecognitionNetwork(num_classes=4).to(self.device)
         
         if os.path.exists(model_path):
             self.model.load_state_dict(torch.load(model_path, map_location=self.device))
@@ -121,15 +123,14 @@ class ImageUpdateThread(QThread):
             print(f"❌ ERROR: Model weights not found at {model_path}")
 
         # Buffers for the 4 TCN branches
-        # r_buf = Range, v_buf = Velocity/Doppler, a_buf = Azimuth, e_buf = Elevation
         self.r_buf, self.v_buf, self.a_buf, self.e_buf = [], [], [], []
         self.prev_cube = None
 
-        # Map your folder names here
-        self.classes = ["Circle CCW", "Circle CW", "Down", "Expand", "Pull", 
-                        "Push", "Shrink", "Swipe Left", "Swipe Right", "Tap", "Up", "Wave"]
+        # ---> CHANGED: Updated classes list to alphabetized 4-gesture subset
+        self.classes = ["Hand Away", "Hand Towards", "Swipe Left", "Swipe Right"]
 
-    def extract_rve_features(self, cube, M=7):
+    # ---> CHANGED: M expanded to 15 for wider spatial footprint
+    def extract_rve_features(self, cube, M=15):
         masked_cube = cube.copy()
         
         # 1. RANGE GATING (3cm resolution)
@@ -149,7 +150,6 @@ class ImageUpdateThread(QThread):
         
         # 5. DOMAIN HACK MULTIPLIERS (BGT60TR13C 2m Config to AWR1642 approximation)
         r_vals = r_idx * 0.03 
-        # Multiply by 1.5 to artificially boost the Doppler magnitude to match 77GHz thresholds
         v_vals = (d_idx - 30) * 0.039 * 1.5 
         az_vals = (az_idx / 15.0) * (np.pi * 120 / 180) - (np.pi * 60 / 180)
         el_vals = (el_idx / 15.0) * (np.pi * 120 / 180) - (np.pi * 60 / 180)
@@ -203,7 +203,7 @@ class ImageUpdateThread(QThread):
                         at_raw = torch.FloatTensor(self.a_buf)
                         et_raw = torch.FloatTensor(self.e_buf)
 
-                        # Apply identical Global Min-Max Scaling
+                        # ---> CHANGED: Apply identical Global Min-Max Scaling
                         rt = (rt_raw / 1.0).view(1, 1, 40).to(self.device)
                         vt = (vt_raw / 2.0).view(1, 1, 40).to(self.device)
                         at = (at_raw / 1.57).view(1, 1, 40).to(self.device)
@@ -213,7 +213,6 @@ class ImageUpdateThread(QThread):
                         if max_energy > self.noise_threshold:
                             print(f"MOTION detected! MaxE: {max_energy:.2f} | R: {r:.2f} | V: {v:.2f}")
                         else:
-                            # Useful to verify the gate is working
                             if self.r_buf[-1] == 0.0 and self.r_buf[-2] != 0.0:
                                 print("STILLNESS: Noise floor reached.")
 
@@ -255,7 +254,10 @@ def main():
     # Parameters
     PORT = 9575
     CFG_DIR = "radar_config/config_3rx_2m"
-    MODEL_PATH = "weights/best_fmcw_model.pth"
+    
+    # Make sure this points to the newly saved 4-class weights file!
+    MODEL_PATH = "weights/best_fmcw_model_v6.pth" 
+    
     PLOTS = [(0, 0, "Range", "Doppler"), (0, 1, "Azimuth", "Range"), (0, 2, "Azimuth", "Doppler")]
 
     # UI Setup

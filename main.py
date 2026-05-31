@@ -58,10 +58,10 @@ def main():
             print("Invalid input. Defaulting to FMCW Lightweight Model...")
         print(f"Initializing FMCW Lightweight Model for {NUM_CLASSES} classes...")
         model = GestureRecognitionNetwork(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_fmcw_model_v5.pth"
+        save_filename = "best_fmcw_model_v6.pth"
 
     # --- 3. Hyperparameters ---
-    num_epochs = 100
+    num_epochs = 80
     learning_rate = 0.001
     batch_size = 16
 
@@ -85,6 +85,7 @@ def main():
     # --- 5. Loss and Optimizer ---
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.5)
     
     # --- 6. Training Loop ---
     best_val_acc = 0.0
@@ -104,25 +105,29 @@ def main():
             batch_labels = batch_labels.to(device)
 
             # --- DATA AUGMENTATION (Training Only) ---
-            # Alphabetical indices: hand_away(0), hand_towards(1), rest(2), swipe_down(3), swipe_left(4), swipe_right(5), swipe_up(6)
-            
-            # Create a mask to PREVENT augmenting the 'rest' class (index 2)
-            # This ensures perfect stillness remains perfectly still
-            mask = (batch_labels != REST_INDEX).view(-1, 1, 1).float()
+            # 1. Amplitude Scaling (Simulates distance variations)
+            # Multiplies the whole sequence by a random factor between 0.8 and 1.2
+            scale = torch.empty(batch_labels.size(0), 1, 1, device=device).uniform_(0.8, 1.2)
+            range_seq = range_seq * scale
+            vel_seq = vel_seq * scale
+            az_seq = az_seq * scale
+            el_seq = el_seq * scale
 
-            # 1. Inject random Gaussian noise (Simulates slightly different hand speeds/angles)
-            noise_level = 0.05
-            range_seq = range_seq + (torch.randn_like(range_seq) * noise_level * mask)
-            vel_seq = vel_seq + (torch.randn_like(vel_seq) * noise_level * mask)
-            az_seq = az_seq + (torch.randn_like(az_seq) * noise_level * mask)
-            el_seq = el_seq + (torch.randn_like(el_seq) * noise_level * mask)
-            
-            # 2. Random Time-Shifting (Simulates starting the gesture earlier or later)
-            # shift = torch.randint(-2, 3, (1,)).item() # Shift between -2 and +2 frames
-            # range_seq = torch.roll(range_seq, shifts=shift, dims=2)
-            # vel_seq = torch.roll(vel_seq, shifts=shift, dims=2)
-            # az_seq = torch.roll(az_seq, shifts=shift, dims=2)
-            # el_seq = torch.roll(el_seq, shifts=shift, dims=2)
+            # 2. Gaussian Noise (Keep your existing noise, but 0.02 is good)
+            noise_level = 0.02
+            range_seq = range_seq + (torch.randn_like(range_seq) * noise_level)
+            vel_seq = vel_seq + (torch.randn_like(vel_seq) * noise_level)
+            az_seq = az_seq + (torch.randn_like(az_seq) * noise_level)
+            el_seq = el_seq + (torch.randn_like(el_seq) * noise_level)
+
+            # 3. Temporal Shifting (Crucial for Time-Series)
+            # Randomly shift the gesture forward or backward by up to 4 frames
+            shift = torch.randint(-4, 5, (1,)).item()
+            if shift != 0:
+                range_seq = torch.roll(range_seq, shifts=shift, dims=2)
+                vel_seq = torch.roll(vel_seq, shifts=shift, dims=2)
+                az_seq = torch.roll(az_seq, shifts=shift, dims=2)
+                el_seq = torch.roll(el_seq, shifts=shift, dims=2)
             # -----------------------------------------
 
             optimizer.zero_grad()
@@ -148,6 +153,8 @@ def main():
 
         avg_train_loss = train_loss / len(train_loader)
         train_acc = (correct_train / total_train) * 100
+
+        scheduler.step()
 
         # -- Validation Phase --
         model.eval()

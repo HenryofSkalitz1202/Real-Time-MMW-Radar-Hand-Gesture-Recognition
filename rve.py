@@ -3,7 +3,7 @@ import numpy as np
 
 ## RVE: Representative Value Extraction
 
-def process_csv_to_tensor(file_path, seq_length=40, M=7):
+def process_csv_to_tensor(file_path, seq_length=40, M=20):
     """
     Reads a raw gesture CSV and converts it to a (4, seq_length) feature matrix.
     Output Order: [Range, Velocity, Azimuth, Elevation]
@@ -36,11 +36,15 @@ def process_csv_to_tensor(file_path, seq_length=40, M=7):
         def process_frame(frame_data):
             top_m = frame_data.sort_values(by='PeakValue', ascending=False).head(M)
 
+            # Extract the raw power values to use as gravity/weights
+            weights = top_m['PeakValue'].values + 1e-9 # Add epsilon to prevent div by zero
+
             return pd.Series({
-                'Range': top_m['Range'].mean(),
-                'Velocity': top_m['Velocity'].mean(),
-                'Azimuth': top_m['Azimuth'].mean(),
-                'Elevation': top_m['Elevation'].mean()
+                # Calculate the Weighted Average (Center of Mass)
+                'Range': np.average(top_m['Range'], weights=weights),
+                'Velocity': np.average(top_m['Velocity'], weights=weights),
+                'Azimuth': np.average(top_m['Azimuth'], weights=weights),
+                'Elevation': np.average(top_m['Elevation'], weights=weights)
             })
             
         frames = df.groupby('FrameNumber').apply(process_frame).reset_index(drop=True)
