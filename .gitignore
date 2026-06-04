@@ -1,6 +1,12 @@
 ref_data
 data
+data_51cm
+data_nau
 rest
 model
+MMW-HAT
 __pycache__
+.vscode
+*.csv
+*.png
 *.pth

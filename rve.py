@@ -3,7 +3,7 @@ import numpy as np
 
 ## RVE: Representative Value Extraction
 
-def process_csv_to_tensor(file_path, seq_length=40, M=7):
+def process_csv_to_tensor(file_path, seq_length=40, M=20):
     """
     Reads a raw gesture CSV and converts it to a (4, seq_length) feature matrix.
     Output Order: [Range, Velocity, Azimuth, Elevation]

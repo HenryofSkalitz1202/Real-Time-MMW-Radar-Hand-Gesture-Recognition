@@ -24,7 +24,7 @@ def main():
 
     # --- 1. Load Dataset FIRST to dynamically get num_classes ---
     print("\nLoading dataset...")
-    full_dataset = RadarGestureDataset(data_dir="Data", seq_length=40)
+    full_dataset = RadarGestureDataset(data_dir="Data_51cm", seq_length=40)
     labels = [sample[1] for sample in full_dataset.samples]
     
     NUM_CLASSES = len(full_dataset.classes)
@@ -59,7 +59,7 @@ def main():
             print("Invalid input. Defaulting to FMCW Lightweight Model...")
         print(f"Initializing FMCW Lightweight Model for {NUM_CLASSES} classes...")
         model = GestureRecognitionNetwork(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_fmcw_model_v8.5.pth"
+        save_filename = "best_fmcw_model_v8.51.pth"
         model_name = "TCN"
 
     # --- 3. Hyperparameters ---
@@ -231,7 +231,7 @@ def main():
     plt.tight_layout()
     
     # Dynamic filename ensures no overwrites!
-    cm_filename = f"debug_confusion_matrix_{model_name}.png"
+    cm_filename = f"debug_confusion_matrix_51_{model_name}.png"
     plt.savefig(cm_filename, dpi=300)
     print(f"Saved '{cm_filename}'. Please review it!")
 
@@ -244,7 +244,7 @@ def main():
     model.load_state_dict(torch.load(save_filename))
     model.eval()
 
-    log_filename = f"misclassified_log_{model_name}.csv"
+    log_filename = f"misclassified_log_51_{model_name}.csv"
     
     with open(log_filename, "w") as f:
         f.write("True_Class,Predicted_Class,File_Path\n")
