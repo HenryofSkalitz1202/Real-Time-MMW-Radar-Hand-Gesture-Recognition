@@ -1,8 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import time
-from tqdm import tqdm # Import tqdm for the progress bar
 
 # 1. Depthwise Separable 1D Convolution
 class DepthwiseSeparableConv1d(nn.Module):
@@ -64,7 +61,7 @@ class TemporalBlock(nn.Module):
 
 # 4. A Single DS-TCN Branch
 class DS_TCN_Branch(nn.Module):
-    def __init__(self, in_channels=1, num_channels=16, kernel_size=3, dropout=0.1):
+    def __init__(self, in_channels=1, num_channels=16, kernel_size=3, dropout=0.15):
         super().__init__()
         layers = []
         # The paper uses 3 temporal blocks with dilation rates 1, 2, and 4
@@ -159,7 +156,7 @@ class GestureRecognitionNetwork(nn.Module):
         self.fusion_block1 = DS_CA_Block(in_channels=64, out_channels=128)
         self.fusion_block2 = DS_CA_Block(in_channels=128, out_channels=128)
         
-        self.dropout = nn.Dropout(0.3)
+        self.dropout = nn.Dropout(0.5)
         
         # After two MaxPool1d(2) operations, your 40-frame sequence becomes 10 frames long.
         # Flattened size: 128 channels * 10 frames = 1280

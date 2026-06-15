@@ -6,13 +6,19 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import train_test_split
+import torch.nn.functional as F
 from tqdm import tqdm
 import numpy as np
+import re
+import os
+import random
 
-from dataset import RadarGestureDataset
+from dataset2 import RadarGestureDataset
 from model.one_d_tcn import GestureRecognitionNetwork 
 from model.srdst import SRDST_Adapted_Network
 from model.lstm import LSTM_Gesture_Network
+from sklearn.model_selection import GroupShuffleSplit
+from torch.utils.data import Subset, DataLoader
 
 def main():
     print("="*50)
@@ -53,33 +59,83 @@ def main():
             print("Invalid input. Defaulting to FMCW Lightweight Model...")
         print(f"Initializing FMCW Lightweight Model for {NUM_CLASSES} classes...")
         model = GestureRecognitionNetwork(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_fmcw_model_v10.51.pth"
+        save_filename = "best_fmcw_model_vgss.51.pth"
         model_name = "TCN"
 
     # --- 3. Hyperparameters ---
     num_epochs = 100
-    learning_rate = 0.001
+    learning_rate = 0.00318
     batch_size = 16
 
     # --- 4. Split the Dataset ---
+    # a. The Robust Block ID Function
+    def get_block_id(filepath):
+        filename = os.path.basename(str(filepath))
+        nums = re.findall(r'\d+', filename)
+        
+        if not nums:
+            return "unknown"
+            
+        num = int(nums[0])
+        
+        if 1 <= num <= 200: return "S1_E1"
+        elif 201 <= num <= 250 or 801 <= num <= 810: return "S2_E2"
+        elif 251 <= num <= 301: return "S3_E3"
+        elif 321 <= num <= 370: return "S4_E3"
+        elif 371 <= num <= 425: return "S1_E4"
+        elif 426 <= num <= 450: return "S5_E4"
+        elif 451 <= num <= 500: return "S6_E5"
+        else: return "unknown"
+
+    # b. Track unknowns and build the Super Labels
+    super_labels = []
+    unknown_files = []
+
+    for filepath, label in full_dataset.samples:
+        block_id = get_block_id(filepath)
+        
+        # Catch the unknowns for printing
+        if block_id == "unknown":
+            unknown_files.append(os.path.basename(str(filepath)))
+            
+        # Create the combined label (e.g., "1_S1_E1" or "swipe_down_S1_E1")
+        super_labels.append(f"{label}_{block_id}")
+
+    # c. Print the unknown files if any exist
+    if unknown_files:
+        print(f"\n⚠️ WARNING: Found {len(unknown_files)} files classified as 'unknown':")
+        # Only print the first 20 so it doesn't flood your terminal if there are hundreds
+        for uf in unknown_files[:20]:
+            print(f"  - {uf}")
+        if len(unknown_files) > 20:
+            print(f"  ... and {len(unknown_files) - 20} more.")
+        print("\n")
+    else:
+        print("✅ All files successfully mapped to a Subject/Environment block!")
+
+    # d. The Weighted Proportional Split
+    # By stratifying on the super_label, it guarantees exactly 20% of each block is taken.
     train_idx, val_idx = train_test_split(
         range(len(full_dataset)), 
         test_size=0.2, 
-        stratify=labels, 
-        random_state=42
+        stratify=super_labels, 
+        random_state=42 # Keeps your split consistent
     )
-    
+
     train_dataset = Subset(full_dataset, train_idx)
     val_dataset = Subset(full_dataset, val_idx)
-    
-    print(f"Data Split - Train: {len(train_dataset)}, Val: {len(val_dataset)}")
-    
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
+    # Verify the split
+    print(f"Data Split - Train: {len(train_dataset)}, Val: {len(val_dataset)}")
+    print(f"Validation percentage: {(len(val_dataset) / len(full_dataset)) * 100:.2f}%\n")
+
+    # DataLoaders
+    train_loader = DataLoader(train_dataset, batch_size=24, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=24, shuffle=False)
+    
     # --- 5. Loss and Optimizer ---
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0.00058)
     
     # --- 6. Training Loop ---
     best_val_acc = 0.0
@@ -103,10 +159,8 @@ def main():
             scale = torch.empty(batch_labels.size(0), 1, 1, device=device).uniform_(0.8, 1.2)
             range_seq = range_seq * scale
             vel_seq = vel_seq * scale
-            # az_seq = az_seq * scale
-            # el_seq = el_seq * scale
 
-            # 2. ASYMMETRIC Gaussian Noise
+            # 3. ASYMMETRIC Gaussian Noise
             # R/V can handle 0.02, but Az/El need 0.005 to protect the Left/Right phase boundary
             noise_level_rv = 0.02
             noise_level_azel = 0.005
@@ -121,13 +175,25 @@ def main():
             az_seq = az_seq + noise_a
             el_seq = el_seq + noise_e
 
-            # 3. Temporal Shifting (Crucial for Time-Series)
+            # BOUNDARY PROTECTION: Clamp angles so noise doesn't exceed physical radians
+            az_seq = torch.clamp(az_seq, -1.0, 1.0)
+            el_seq = torch.clamp(el_seq, -1.0, 1.0)
+
+            # 4. Temporal Shifting (Crucial for Time-Series)
             shift = torch.randint(-4, 5, (1,)).item()
-            if shift != 0:
-                range_seq = torch.roll(range_seq, shifts=shift, dims=2)
-                vel_seq = torch.roll(vel_seq, shifts=shift, dims=2)
-                az_seq = torch.roll(az_seq, shifts=shift, dims=2)
-                el_seq = torch.roll(el_seq, shifts=shift, dims=2)
+            if shift > 0:
+                # Shift right (gesture starts later) -> push data right, pad left with zeros
+                range_seq = F.pad(range_seq[:, :, :-shift], (shift, 0), value=0.0)
+                vel_seq = F.pad(vel_seq[:, :, :-shift], (shift, 0), value=0.0)
+                az_seq = F.pad(az_seq[:, :, :-shift], (shift, 0), value=0.0)
+                el_seq = F.pad(el_seq[:, :, :-shift], (shift, 0), value=0.0)
+            elif shift < 0:
+                # Shift left (gesture starts earlier) -> push data left, pad right with zeros
+                shift_abs = abs(shift)
+                range_seq = F.pad(range_seq[:, :, shift_abs:], (0, shift_abs), value=0.0)
+                vel_seq = F.pad(vel_seq[:, :, shift_abs:], (0, shift_abs), value=0.0)
+                az_seq = F.pad(az_seq[:, :, shift_abs:], (0, shift_abs), value=0.0)
+                el_seq = F.pad(el_seq[:, :, shift_abs:], (0, shift_abs), value=0.0)
             # -----------------------------------------
 
             optimizer.zero_grad()
@@ -144,7 +210,7 @@ def main():
             total_train += batch_labels.size(0)
             correct_train += (predicted == batch_labels).sum().item()
             
-            loop.set_postfix(loss=loss.item(), train_acc=f"{train_acc:.2f}%")
+            loop.set_postfix(loss=loss.item(), acc= f"{100.0 * correct_train / total_train:.2f}%")
 
         avg_train_loss = train_loss / len(train_loader)
         train_acc = (correct_train / total_train) * 100
@@ -227,7 +293,7 @@ def main():
     plt.tight_layout()
     
     # Dynamic filename ensures no overwrites!
-    cm_filename = f"debug_confusion_matrix_51_{model_name}.png"
+    cm_filename = f"debug_confusion_matrix_51_gss_{model_name}.png"
     plt.savefig(cm_filename, dpi=300)
     print(f"Saved '{cm_filename}'. Please review it!")
 
@@ -240,7 +306,7 @@ def main():
     model.load_state_dict(torch.load(save_filename))
     model.eval()
 
-    log_filename = f"misclassified_log_51_{model_name}.csv"
+    log_filename = f"misclassified_log_51_gss_{model_name}.csv"
     
     with open(log_filename, "w") as f:
         f.write("True_Class,Predicted_Class,File_Path\n")

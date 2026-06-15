@@ -30,12 +30,6 @@ def main():
     NUM_CLASSES = len(full_dataset.classes)
     print(f"Detected {NUM_CLASSES} classes: {full_dataset.classes}")
 
-    REST_INDEX = full_dataset.class_to_idx.get("rest", -1)
-    if REST_INDEX != -1:
-        print(f"Found 'Rest' class at index {REST_INDEX}. Will exclude from noise augmentation.")
-    else:
-        print("Warning: No 'Rest' class found. All classes will receive noise augmentation.")
-
     # --- 2. Model Selection UI ---
     print("\nAvailable Models:")
     print("1: FMCW Lightweight (DS-TCN + ECA)         [UPDATED FOR 4 INPUTS]")
@@ -59,7 +53,7 @@ def main():
             print("Invalid input. Defaulting to FMCW Lightweight Model...")
         print(f"Initializing FMCW Lightweight Model for {NUM_CLASSES} classes...")
         model = GestureRecognitionNetwork(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_fmcw_model_v8.5.pth"
+        save_filename = "best_fmcw_model_v9.pth"
         model_name = "TCN"
 
     # --- 3. Hyperparameters ---
@@ -86,7 +80,6 @@ def main():
     # --- 5. Loss and Optimizer ---
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
-    #scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.5)
     
     # --- 6. Training Loop ---
     best_val_acc = 0.0
@@ -231,7 +224,7 @@ def main():
     plt.tight_layout()
     
     # Dynamic filename ensures no overwrites!
-    cm_filename = f"debug_confusion_matrix_{model_name}.png"
+    cm_filename = f"debug_confusion_matrix_{model_name}_v2.png"
     plt.savefig(cm_filename, dpi=300)
     print(f"Saved '{cm_filename}'. Please review it!")
 
@@ -244,7 +237,7 @@ def main():
     model.load_state_dict(torch.load(save_filename))
     model.eval()
 
-    log_filename = f"misclassified_log_{model_name}.csv"
+    log_filename = f"misclassified_log_{model_name}_v2.csv"
     
     with open(log_filename, "w") as f:
         f.write("True_Class,Predicted_Class,File_Path\n")

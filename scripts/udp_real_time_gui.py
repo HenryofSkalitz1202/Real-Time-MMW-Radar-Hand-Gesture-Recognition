@@ -1,0 +1,226 @@
+import time
+import json
+import os
+import socket
+import sys
+import numpy as np
+import torch
+
+# Pathing setup to ensure it runs from any directory
+current_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.abspath(os.path.join(current_dir, '..'))
+if root_dir not in sys.path:
+    sys.path.append(root_dir)
+
+from utility.helper import find_setting_in_directory, parse_full_frame
+from utility.mmw_cube_proc_v1 import CubeProcessor
+from model.one_d_tcn import GestureRecognitionNetwork
+
+class InferenceEngine:
+    def __init__(self, port, setting, model_path):
+        self.port = port
+        self.__mmw_proc = CubeProcessor(setting)
+        self.noise_threshold = 4.3
+                
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model = GestureRecognitionNetwork(num_classes=6).to(self.device)
+        
+        if os.path.exists(model_path):
+            self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+            self.model.eval()
+            print(f"✅ Headless Mode Active. Model loaded from {model_path}")
+        else:
+            print(f"❌ ERROR: Model weights not found at {model_path}")
+            sys.exit(1)
+
+        self.r_buf = []
+        self.v_buf = []
+        self.a_buf = []
+        self.e_buf = []
+        self.prev_rdm = None
+
+        self.classes = ["Hand Away", "Hand Towards", "Swipe Down", "Swipe Left", "Swipe Right", "Swipe Up"]
+        self.frame_counter = 0
+        
+        # --- NEW STABILITY VARIABLES ---
+        self.startup_frames = 60  # Ignore first ~60 frames for hardware PLL stabilization
+        self.cooldown_frames = 0  # Prevents gesture spamming
+
+    def extract_rve_features(self, power_rdm, complex_cube, M=8):
+        masked_rdm = power_rdm.copy()
+        masked_rdm[:, 17:] = 0 
+        masked_rdm[:8, :] = 0 
+        masked_rdm[-8:, :] = 0 
+
+        masked_rdm = np.log10(masked_rdm + 1e-9)
+
+        flat_indices = np.argsort(masked_rdm.flatten())[-M:]
+        d_idx, r_idx = np.unravel_index(flat_indices, masked_rdm.shape)
+        
+        r_vals, v_vals, az_vals, el_vals, weights = [], [], [], [], []
+        
+        for i in range(len(r_idx)):
+            d = d_idx[i]
+            r = r_idx[i]
+            
+            r_vals.append(r * 0.03)
+            v_vals.append((d - 30) * 0.039 * 1.5) 
+            
+            rx_corner = complex_cube[d, r, 0]
+            rx_az     = complex_cube[d, r, 1]
+            rx_el     = complex_cube[d, r, 2]
+            
+            phase_az = np.angle(rx_corner * np.conj(rx_az))
+            phase_el = np.angle(rx_corner * np.conj(rx_el))
+            
+            az_vals.append(np.arcsin(np.clip(phase_az / np.pi, -1.0, 1.0)))
+            el_vals.append(np.arcsin(np.clip(phase_el / np.pi, -1.0, 1.0)))
+            
+            weights.append(masked_rdm[d, r])
+            
+        weights = np.array(weights) + 1e-9
+        
+        return (
+            np.average(r_vals, weights=weights),
+            np.average(v_vals, weights=weights),
+            np.average(az_vals, weights=weights),
+            np.average(el_vals, weights=weights)
+        )
+
+    def run(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(('0.0.0.0', self.port))
+        
+        # Non-Blocking Mode
+        sock.setblocking(False) 
+        print(f"📥 Listening for UDP stream on port {self.port}...\n")
+        print("⏳ Waiting for hardware to stabilize...")
+
+        try:
+            while True:
+                # --- FIX 1: DO NOT OVERWRITE PACKETS ---
+                # Collect ALL packets currently waiting in the OS network buffer
+                packets = []
+                while True:
+                    try:
+                        data, _ = sock.recvfrom(131072)
+                        packets.append(data)
+                    except BlockingIOError:
+                        break 
+                        
+                if not packets:
+                    time.sleep(0.005) # Yield CPU briefly
+                    continue
+                
+                start_time = time.time()
+
+                # Process every single frame in chronological order
+                for packet_data in packets:
+                    self.frame_counter += 1
+
+                    (_, _, _, raw_payload) = parse_full_frame(packet_data)
+                    self.__mmw_proc.process_raw_data(list(raw_payload))
+                    
+                    curr_rdm = self.__mmw_proc.power_rdm
+                    complex_cube = self.__mmw_proc.complex_cube
+
+                    # --- FIX 2: HARDWARE WARMUP ---
+                    if self.frame_counter < self.startup_frames:
+                        self.prev_rdm = curr_rdm
+                        if self.frame_counter == self.startup_frames - 1:
+                            print("✅ Radar Stabilized. Ready for Gestures.")
+                        continue # Skip everything else until stable
+
+                    # --- FIX 3: COOLDOWN & GESTURE SPAM PREVENTION ---
+                    if self.cooldown_frames > 0:
+                        self.cooldown_frames -= 1
+                        self.prev_rdm = curr_rdm
+                        # Keep the arrays completely empty while cooling down
+                        self.r_buf.clear(); self.v_buf.clear(); self.a_buf.clear(); self.e_buf.clear()
+                        continue
+
+                    if self.prev_rdm is not None:
+                        diff_rdm = np.abs(curr_rdm - self.prev_rdm)
+                        max_energy = np.max(np.log10(diff_rdm + 1e-9))
+                        
+                        if max_energy > self.noise_threshold:
+                            r, v, a, e = self.extract_rve_features(diff_rdm, complex_cube)
+                        else:
+                            r, v, a, e = 0.0, 0.0, 0.0, 0.0
+
+                        self.r_buf.append(r)
+                        self.v_buf.append(v)
+                        self.a_buf.append(a)
+                        self.e_buf.append(e)
+
+                        if len(self.r_buf) > 40:
+                            self.r_buf.pop(0)
+                            self.v_buf.pop(0)
+                            self.a_buf.pop(0)
+                            self.e_buf.pop(0)
+
+                        # Continuous Inference
+                        if len(self.r_buf) == 40:
+                            
+                            # THE SILENCE GATE
+                            if sum(np.abs(self.v_buf)) != 0.0:
+                                rt_raw = torch.FloatTensor(self.r_buf)
+                                vt_raw = torch.FloatTensor(self.v_buf)
+                                at_raw = torch.FloatTensor(self.a_buf)
+                                et_raw = torch.FloatTensor(self.e_buf)
+
+                                rt = (rt_raw / 1.0).view(1, 1, 40).to(self.device)
+                                vt = (vt_raw / 2.0).view(1, 1, 40).to(self.device)
+                                at = (at_raw / 1.57).view(1, 1, 40).to(self.device)
+                                et = (et_raw / 1.57).view(1, 1, 40).to(self.device)
+
+                                with torch.no_grad():
+                                    logits = self.model(rt, vt, at, et)
+                                    probs = torch.softmax(logits, dim=1)
+                                    conf, idx = torch.max(probs, dim=1)
+                                    gesture_name = self.classes[idx]
+                                    
+                                    if max_energy > self.noise_threshold:
+                                        if conf.item() > 0.80:
+                                            print(f"🎯 GESTURE: {gesture_name.ljust(15)} | Confidence: {conf.item()*100:2.0f}% | Energy: {max_energy:.1f}")
+                                            
+                                            # LOCK THE SYSTEM AFTER DETECTION
+                                            self.cooldown_frames = 20 # Ignore next ~0.5 seconds of frames
+                                            self.r_buf.clear()
+                                            self.v_buf.clear()
+                                            self.a_buf.clear()
+                                            self.e_buf.clear()
+                                        else:
+                                            pass
+
+                    self.prev_rdm = curr_rdm
+
+                # ⏱️ STOP TIMER & PROFILE
+                # Print heartbeat less often so it doesn't clutter the terminal
+                if self.frame_counter % 200 == 0:
+                    processing_time_ms = (time.time() - start_time) * 1000
+                    print(f"[System Heartbeat] Math & Inference Latency for batch: {processing_time_ms:.1f} ms")
+
+        except KeyboardInterrupt:
+            print("\n🛑 Stopped by user. Shutting down gracefully...")
+        finally:
+            sock.close()
+
+def main():
+    PORT = 9575
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    root_dir = os.path.abspath(os.path.join(current_dir, ".."))
+    
+    cfg_path = os.path.join(root_dir, "radar_config", "config_3rx_2m")
+    model_path = os.path.join(root_dir, "weights", "newest_best_fmcw_model_v10.51.pth")
+    #model_path = os.path.join(root_dir, "weights", "best_fmcw_model_v8.pth")
+
+    setting_fn = find_setting_in_directory(cfg_path)
+    with open(setting_fn, 'r') as f:
+        setting = json.load(f)
+
+    engine = InferenceEngine(PORT, setting, model_path)
+    engine.run()
+
+if __name__ == '__main__':
+    main()

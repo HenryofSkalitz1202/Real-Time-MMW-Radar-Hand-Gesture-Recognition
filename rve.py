@@ -72,10 +72,10 @@ def process_csv_to_tensor(file_path, seq_length=40, M=20):
 
         # --- GLOBAL MIN-MAX SCALING ---
         # Preserves physical aspect ratios and absolute gesture sizes
-        # feature_matrix[0, :] = feature_matrix[0, :] / 1.0   # Range (0 to 1.0m)
-        # feature_matrix[1, :] = feature_matrix[1, :] / 2.0   # Velocity (+/- 2.0 m/s)
-        # feature_matrix[2, :] = feature_matrix[2, :] / 1.57  # Azimuth (+/- pi/2 rads)
-        # feature_matrix[3, :] = feature_matrix[3, :] / 1.57  # Elevation (+/- pi/2 rads
+        feature_matrix[0, :] = feature_matrix[0, :] / 1.0   # Range (0 to 1.0m)
+        feature_matrix[1, :] = feature_matrix[1, :] / 2.0   # Velocity (+/- 2.0 m/s)
+        feature_matrix[2, :] = feature_matrix[2, :] / 1.57  # Azimuth (+/- pi/2 rads)
+        feature_matrix[3, :] = feature_matrix[3, :] / 1.57  # Elevation (+/- pi/2 rads)
 
         return feature_matrix.astype(np.float32)
         

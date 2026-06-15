@@ -5,6 +5,7 @@ import socket
 import sys
 import numpy as np
 import torch
+from pynput.keyboard import Key, Controller # Added pynput import
 
 # Pathing setup to ensure it runs from any directory
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -20,7 +21,7 @@ class InferenceEngine:
     def __init__(self, port, setting, model_path):
         self.port = port
         self.__mmw_proc = CubeProcessor(setting)
-        self.noise_threshold = 4.5
+        self.noise_threshold = 4.3
                 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = GestureRecognitionNetwork(num_classes=6).to(self.device)
@@ -41,6 +42,56 @@ class InferenceEngine:
 
         self.classes = ["Hand Away", "Hand Towards", "Swipe Down", "Swipe Left", "Swipe Right", "Swipe Up"]
         self.frame_counter = 0
+
+        # --- OS CONTROL SETUP ---
+        self.keyboard = Controller()
+        self.last_action_time = time.time()
+        self.cooldown_seconds = 0.8  # Wait 800ms before accepting another gesture
+
+    def execute_os_action(self, gesture_name):
+        """Maps recognized gestures to low-level Windows keyboard inputs."""
+        current_time = time.time()
+        
+        # The Debounce Lock
+        if current_time - self.last_action_time < self.cooldown_seconds:
+            return # Still in cooldown, ignore
+
+        if gesture_name == "Swipe Right":
+            # Alt + Tab (Switch Window)
+            with self.keyboard.pressed(Key.alt):
+                self.keyboard.press(Key.tab)
+                self.keyboard.release(Key.tab)
+                
+        elif gesture_name == "Swipe Left":
+            # Shift + Alt + Tab (Switch Window Backwards)
+            with self.keyboard.pressed(Key.alt):
+                with self.keyboard.pressed(Key.shift):
+                    self.keyboard.press(Key.tab)
+                    self.keyboard.release(Key.tab)
+                    
+        elif gesture_name == "Swipe Up":
+            # Volume Up
+            self.keyboard.press(Key.media_volume_up)
+            self.keyboard.release(Key.media_volume_up)
+            
+        elif gesture_name == "Swipe Down":
+            # Volume Down
+            self.keyboard.press(Key.media_volume_down)
+            self.keyboard.release(Key.media_volume_down)
+            
+        elif gesture_name == "Hand Towards":
+            # Play/Pause Media
+            self.keyboard.press(Key.media_play_pause)
+            self.keyboard.release(Key.media_play_pause)
+            
+        elif gesture_name == "Hand Away":
+            # Show Desktop (Win + D)
+            with self.keyboard.pressed(Key.cmd): # Win key
+                self.keyboard.press('d')
+                self.keyboard.release('d')
+
+        # Reset the cooldown timer
+        self.last_action_time = time.time()
 
     def extract_rve_features(self, power_rdm, complex_cube, M=8):
         masked_rdm = power_rdm.copy()
@@ -72,10 +123,7 @@ class InferenceEngine:
             az_vals.append(np.arcsin(np.clip(phase_az / np.pi, -1.0, 1.0)))
             el_vals.append(np.arcsin(np.clip(phase_el / np.pi, -1.0, 1.0)))
             
-            # CRITICAL FIX: Convert log weights back to linear!
-            linear_power = 10 ** masked_rdm[d, r]
-            weights.append(linear_power)
-            #weights.append(masked_rdm[d, r])
+            weights.append(masked_rdm[d, r])
             
         weights = np.array(weights) + 1e-9
         
@@ -166,9 +214,16 @@ class InferenceEngine:
                                 if max_energy > self.noise_threshold:
                                     if conf.item() > 0.80:
                                         print(f"🎯 GESTURE: {gesture_name.ljust(15)} | Confidence: {conf.item()*100:2.0f}% | Energy: {max_energy:.1f}")
-                                    else:
-                                        # Optional: Print low confidence guesses dimly or omit them.
-                                        pass
+                                        
+                                        # TRIGGER WINDOWS OS COMMAND
+                                        self.execute_os_action(gesture_name)
+                                        
+                                        # Clear the buffer after a successful action 
+                                        # to force the model to wait for a completely new motion
+                                        self.r_buf.clear()
+                                        self.v_buf.clear()
+                                        self.a_buf.clear()
+                                        self.e_buf.clear()
 
                 self.prev_rdm = curr_rdm
 
@@ -192,7 +247,7 @@ def main():
     root_dir = os.path.abspath(os.path.join(current_dir, ".."))
     
     cfg_path = os.path.join(root_dir, "radar_config", "config_3rx_2m")
-    model_path = os.path.join(root_dir, "weights", "best_fmcw_model_vhelp.51.pth")
+    model_path = os.path.join(root_dir, "weights", "best_fmcw_model_v8.pth")
     
     setting_fn = find_setting_in_directory(cfg_path)
     with open(setting_fn, 'r') as f:
