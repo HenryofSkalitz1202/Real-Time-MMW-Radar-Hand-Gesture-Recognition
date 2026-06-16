@@ -61,7 +61,7 @@ class TemporalBlock(nn.Module):
 
 # 4. A Single DS-TCN Branch
 class DS_TCN_Branch(nn.Module):
-    def __init__(self, in_channels=1, num_channels=16, kernel_size=3, dropout=0.15):
+    def __init__(self, in_channels=1, num_channels=16, kernel_size=3, dropout=0.1):
         super().__init__()
         layers = []
         # The paper uses 3 temporal blocks with dilation rates 1, 2, and 4
@@ -145,7 +145,7 @@ class DS_CA_Block(nn.Module):
     
 class GestureRecognitionNetwork(nn.Module):
     """The Complete Two-Stage Architecture """
-    def __init__(self, num_classes=7): # Updated to 7 for 6 gestures + 1 rest class
+    def __init__(self, num_classes=6): # Swipe Up, Swipe Down, Swipe Left, Swipe Right, Hand Towards, Hand Away
         super().__init__()
         
         # Stage 1: Feature Extraction
@@ -156,7 +156,7 @@ class GestureRecognitionNetwork(nn.Module):
         self.fusion_block1 = DS_CA_Block(in_channels=64, out_channels=128)
         self.fusion_block2 = DS_CA_Block(in_channels=128, out_channels=128)
         
-        self.dropout = nn.Dropout(0.5)
+        self.dropout = nn.Dropout(0.3)
         
         # After two MaxPool1d(2) operations, your 40-frame sequence becomes 10 frames long.
         # Flattened size: 128 channels * 10 frames = 1280
