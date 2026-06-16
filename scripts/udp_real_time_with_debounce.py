@@ -93,35 +93,6 @@ class InferenceEngine:
             np.average(el_vals, weights=weights)
         )
 
-    def execute_os_action(self, gesture):
-        """Maps recognized gestures to OS media controls."""
-        if gesture == "Swipe Left":
-            # Previous Track
-            self.keyboard.press(Key.media_previous)
-            self.keyboard.release(Key.media_previous)
-            
-        elif gesture == "Swipe Right":
-            # Next Track
-            self.keyboard.press(Key.media_next)
-            self.keyboard.release(Key.media_next)
-            
-        elif gesture == "Swipe Up":
-            # Volume Up (Looping it 4 times makes the volume jump more noticeable per swipe)
-            for _ in range(4):
-                self.keyboard.press(Key.media_volume_up)
-                self.keyboard.release(Key.media_volume_up)
-                
-        elif gesture == "Swipe Down":
-            # Volume Down
-            for _ in range(4):
-                self.keyboard.press(Key.media_volume_down)
-                self.keyboard.release(Key.media_volume_down)
-                
-        elif gesture == "Hand Towards" or gesture == "Hand Away":
-            # Play / Pause Toggle
-            self.keyboard.press(Key.media_play_pause)
-            self.keyboard.release(Key.media_play_pause)
-
     def run(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(('0.0.0.0', self.port))
@@ -210,9 +181,7 @@ class InferenceEngine:
                                         # Trigger OS action only if cooldown is zero
                                         if self.cooldown_frames == 0:
                                             print(f"🎯 GESTURE: {gesture_name.ljust(15)} | Confidence: {conf.item()*100:2.0f}% | Energy: {max_energy:.1f}")
-                                        #     self.execute_os_action(gesture_name)
                                             self.cooldown_frames = self.cooldown_threshold # Reset cooldown
-                                        #     print(f"   ⚡ Executed OS Action! Cooldown engaged.")
 
                 self.prev_rdm = curr_rdm
 
