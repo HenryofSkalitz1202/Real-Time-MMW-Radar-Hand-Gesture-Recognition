@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.signal.windows import blackmanharris
 from utility.helper import read_uint12, split_samples, parse_radar_cfg
 from utility.FFTW import FFTWProcessor
 
@@ -40,6 +41,11 @@ class CubeProcessor:
             threads=threads
         )
 
+        # REVISI EVALUASI 1: Generate Blackman-Harris window 2D di saat inisialisasi agar hemat CPU
+        window_doppler = blackmanharris(self.radar_param["num_chirps_per_frame"])
+        window_range = blackmanharris(self.radar_param["num_samples_per_chirp"])
+        self.window_2d = np.outer(window_doppler, window_range)[..., np.newaxis] # Shape: (Chirps, Samples, 1)
+
         self.previous_data_cube = None
         self.complex_cube = None
         self.power_rdm = None
@@ -64,8 +70,16 @@ class CubeProcessor:
             if self.radar_param["rx_mask"] & (1 << (antenna - 1)):
                 data_cube[0:self.radar_param["num_chirps_per_frame"], 0:self.radar_param["num_samples_per_chirp"], idx] = adc_data_split[0, :, :, antenna - 1]
 
+        # REVISI EVALUASI 2: Mean subtraction (penghapusan komponen DC) pada sumbu chirp untuk sinyal IF mentah
+        data_cube[0:self.radar_param["num_chirps_per_frame"], 0:self.radar_param["num_samples_per_chirp"], :] -= np.mean(
+            data_cube[0:self.radar_param["num_chirps_per_frame"], 0:self.radar_param["num_samples_per_chirp"], :], axis=0
+        )
+
         if self.mti_alpha is not None:
             data_cube = self.mti_process(data_cube)
+
+        # REVISI EVALUASI 1: Terapkan window Blackman-Harris tepat sebelum mengeksekusi 2D FFT
+        data_cube[0:self.radar_param["num_chirps_per_frame"], 0:self.radar_param["num_samples_per_chirp"], :] *= self.window_2d
 
         self.fftw_proc.input_array[:, :, :] = data_cube
         data_cube_fft = self.fftw_proc.run()
@@ -77,7 +91,7 @@ class CubeProcessor:
         self.complex_cube = data_cube_fft[:, self.range_skip:self.proc_param["num_range_bin"] >> 1, :]
         
         # Integrate absolute power across all 3 antennas to create the 2D Master Range-Doppler Map
-        self.power_rdm = np.sum(np.abs(self.complex_cube), axis=2)
+        self.power_rdm = np.sum(np.abs(self.complex_cube), axis=2) / 3.0
 
     def vis_2d(self):
         # We drop the Azimuth/Elevation plots to save CPU on the Raspberry Pi

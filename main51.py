@@ -6,13 +6,19 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import train_test_split
+import torch.nn.functional as F
 from tqdm import tqdm
 import numpy as np
+import re
+import os
+import random
 
 from dataset import RadarGestureDataset
 from model.one_d_tcn import GestureRecognitionNetwork 
 from model.srdst import SRDST_Adapted_Network
 from model.lstm import LSTM_Gesture_Network
+from sklearn.model_selection import GroupShuffleSplit
+from torch.utils.data import Subset, DataLoader
 
 def main():
     print("="*50)
@@ -24,7 +30,7 @@ def main():
 
     # --- 1. Load Dataset FIRST to dynamically get num_classes ---
     print("\nLoading dataset...")
-    full_dataset = RadarGestureDataset(data_dir="Data_51cm", seq_length=40)
+    full_dataset = RadarGestureDataset(data_dir="Data", seq_length=40)
     labels = [sample[1] for sample in full_dataset.samples]
     
     NUM_CLASSES = len(full_dataset.classes)
@@ -41,27 +47,52 @@ def main():
     if choice == '3':
         print(f"Initializing LSTM Model for {NUM_CLASSES} classes...")
         model = LSTM_Gesture_Network(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_lstm_model_v5.pth"
+        save_filename = "best_lstm_model_v51_b8_paper_rand.pth"
         model_name = "LSTM"
     elif choice == '2':
         print(f"Initializing SRDST Adapted Model for {NUM_CLASSES} classes...")
         model = SRDST_Adapted_Network(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_srdst_model_v5.pth"
+        save_filename = "best_srdst_model_v51_b8_paper_rand.pth"
         model_name = "SRDST"
     else:
         if choice != '1':
             print("Invalid input. Defaulting to FMCW Lightweight Model...")
         print(f"Initializing FMCW Lightweight Model for {NUM_CLASSES} classes...")
         model = GestureRecognitionNetwork(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_fmcw_model_v10.51.pth"
+        save_filename = "best_fmcw_model_v51_b8_paper_rand.pth"
         model_name = "TCN"
 
     # --- 3. Hyperparameters ---
     num_epochs = 100
     learning_rate = 0.001
-    batch_size = 16
+    batch_size = 32
 
-    # --- 4. Split the Dataset ---
+# --- 4. Split the Dataset ---
+    # VAL_INDICES = set(random.sample(range(1, 251), 100))
+
+    # def split_index(filepath):
+    #     filename = os.path.basename(str(filepath))
+    #     nums = re.findall(r'\d+', filename)
+    #     if not nums: 
+    #         return "unknown"
+        
+    #     num = int(nums[0])
+    
+    #     if num in VAL_INDICES: 
+    #         return "VAL"        
+    #     else: 
+    #         return "TRAIN"
+
+    # train_idx = []
+    # val_idx = []
+    
+    # for i, (filepath, _) in enumerate(full_dataset.samples):
+    #     idx_counter = split_index(filepath)
+    #     if idx_counter == "VAL":
+    #         val_idx.append(i)
+    #     elif idx_counter == "TRAIN":
+    #         train_idx.append(i)
+
     train_idx, val_idx = train_test_split(
         range(len(full_dataset)), 
         test_size=0.2, 
@@ -73,7 +104,8 @@ def main():
     val_dataset = Subset(full_dataset, val_idx)
     
     print(f"Data Split - Train: {len(train_dataset)}, Val: {len(val_dataset)}")
-    
+    print(f"Validation percentage: {(len(val_dataset) / (len(train_dataset) + len(val_dataset))) * 100:.2f}%\n")
+
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
@@ -99,35 +131,45 @@ def main():
             batch_labels = batch_labels.to(device)
 
             # --- DATA AUGMENTATION (Training Only) ---
-            # 1. Amplitude Scaling (Simulates distance variations)
-            scale = torch.empty(batch_labels.size(0), 1, 1, device=device).uniform_(0.8, 1.2)
-            range_seq = range_seq * scale
-            vel_seq = vel_seq * scale
-            # az_seq = az_seq * scale
-            # el_seq = el_seq * scale
+            # # 1. Amplitude Scaling (Simulates distance variations)
+            # scale = torch.empty(batch_labels.size(0), 1, 1, device=device).uniform_(0.8, 1.2)
+            # range_seq = range_seq * scale
+            # vel_seq = vel_seq * scale
 
-            # 2. ASYMMETRIC Gaussian Noise
-            # R/V can handle 0.02, but Az/El need 0.005 to protect the Left/Right phase boundary
-            noise_level_rv = 0.02
-            noise_level_azel = 0.005
+            # # 2. ASYMMETRIC Gaussian Noise
+            # # R/V can handle 0.02, but Az/El need 0.005 to protect the Left/Right phase boundary
+            # noise_level_rv = 0.02
+            # noise_level_azel = 0.005
 
-            noise_r = torch.randn_like(range_seq) * noise_level_rv
-            noise_v = torch.randn_like(vel_seq) * noise_level_rv
-            noise_a = torch.randn_like(az_seq) * noise_level_azel
-            noise_e = torch.randn_like(el_seq) * noise_level_azel
+            # noise_r = torch.randn_like(range_seq) * noise_level_rv
+            # noise_v = torch.randn_like(vel_seq) * noise_level_rv
+            # noise_a = torch.randn_like(az_seq) * noise_level_azel
+            # noise_e = torch.randn_like(el_seq) * noise_level_azel
             
-            range_seq = range_seq + noise_r
-            vel_seq = vel_seq + noise_v
-            az_seq = az_seq + noise_a
-            el_seq = el_seq + noise_e
+            # range_seq = range_seq + noise_r
+            # vel_seq = vel_seq + noise_v
+            # az_seq = az_seq + noise_a
+            # el_seq = el_seq + noise_e
 
-            # 3. Temporal Shifting (Crucial for Time-Series)
-            shift = torch.randint(-4, 5, (1,)).item()
-            if shift != 0:
-                range_seq = torch.roll(range_seq, shifts=shift, dims=2)
-                vel_seq = torch.roll(vel_seq, shifts=shift, dims=2)
-                az_seq = torch.roll(az_seq, shifts=shift, dims=2)
-                el_seq = torch.roll(el_seq, shifts=shift, dims=2)
+            # # BOUNDARY PROTECTION: Clamp angles so noise doesn't exceed physical radians
+            # az_seq = torch.clamp(az_seq, -1.0, 1.0)
+            # el_seq = torch.clamp(el_seq, -1.0, 1.0)
+
+            # # 4. Temporal Shifting (Crucial for Time-Series)
+            # shift = torch.randint(-4, 5, (1,)).item()
+            # if shift > 0:
+            #     # Shift right (gesture starts later) -> push data right, pad left with zeros
+            #     range_seq = F.pad(range_seq[:, :, :-shift], (shift, 0), value=0.0)
+            #     vel_seq = F.pad(vel_seq[:, :, :-shift], (shift, 0), value=0.0)
+            #     az_seq = F.pad(az_seq[:, :, :-shift], (shift, 0), value=0.0)
+            #     el_seq = F.pad(el_seq[:, :, :-shift], (shift, 0), value=0.0)
+            # elif shift < 0:
+            #     # Shift left (gesture starts earlier) -> push data left, pad right with zeros
+            #     shift_abs = abs(shift)
+            #     range_seq = F.pad(range_seq[:, :, shift_abs:], (0, shift_abs), value=0.0)
+            #     vel_seq = F.pad(vel_seq[:, :, shift_abs:], (0, shift_abs), value=0.0)
+            #     az_seq = F.pad(az_seq[:, :, shift_abs:], (0, shift_abs), value=0.0)
+            #     el_seq = F.pad(el_seq[:, :, shift_abs:], (0, shift_abs), value=0.0)
             # -----------------------------------------
 
             optimizer.zero_grad()
@@ -144,7 +186,7 @@ def main():
             total_train += batch_labels.size(0)
             correct_train += (predicted == batch_labels).sum().item()
             
-            loop.set_postfix(loss=loss.item(), train_acc=f"{train_acc:.2f}%")
+            loop.set_postfix(loss=loss.item(), acc= f"{100.0 * correct_train / total_train:.2f}%")
 
         avg_train_loss = train_loss / len(train_loader)
         train_acc = (correct_train / total_train) * 100
@@ -227,7 +269,7 @@ def main():
     plt.tight_layout()
     
     # Dynamic filename ensures no overwrites!
-    cm_filename = f"debug_confusion_matrix_51_{model_name}.png"
+    cm_filename = f"debug_confusion_matrix_51_b8_paper_rand_{model_name}.png"
     plt.savefig(cm_filename, dpi=300)
     print(f"Saved '{cm_filename}'. Please review it!")
 
@@ -240,7 +282,7 @@ def main():
     model.load_state_dict(torch.load(save_filename))
     model.eval()
 
-    log_filename = f"misclassified_log_51_{model_name}.csv"
+    log_filename = f"misclassified_log_51_b8_paper_rand_{model_name}.csv"
     
     with open(log_filename, "w") as f:
         f.write("True_Class,Predicted_Class,File_Path\n")
