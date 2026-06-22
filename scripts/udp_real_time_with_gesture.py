@@ -42,16 +42,16 @@ class InferenceEngine:
 
         self.classes = ["Hand Away", "Hand Towards", "Swipe Down", "Swipe Left", "Swipe Right", "Swipe Up"]
         self.frame_counter = 0
-        
-        # --- UDP JITTER FIX ---
-        self.last_seq = -1 
 
         # --- OS Control & Debouncing Setup ---
         self.keyboard = Controller()
         self.cooldown_frames = 0
         # Wait 20 frames (~0.6 seconds at 30fps) before allowing a new OS action.
-        # Tune this up or down depending on your physical radar's frame rate.
-        self.cooldown_threshold = 60
+        self.cooldown_threshold = 45
+
+        # --- GUI Hooks ---
+        self.os_control_active = False  # Controlled by GUI toggle
+        self.gui_callback = None        # Sends data back to GUI
 
     def extract_rve_features(self, power_rdm, complex_cube, M=8):
         masked_rdm = power_rdm.copy()
@@ -157,16 +157,7 @@ class InferenceEngine:
                 if self.cooldown_frames > 0:
                     self.cooldown_frames -= 1
 
-                # 1. Extract the sequence number alongside the payload
-                (_, seq, _, raw_payload) = parse_full_frame(latest_data)
-                
-                # 2. STRICT FORWARD-TIME ENFORCEMENT
-                if self.last_seq != -1 and seq <= self.last_seq:
-                    # This packet arrived late due to UDP jitter. 
-                    # Processing it would scramble the TCN's temporal context.
-                    continue
-                
-                self.last_seq = seq # Update the tracker
+                (_, _, _, raw_payload) = parse_full_frame(latest_data)
                 
                 self.__mmw_proc.process_raw_data(list(raw_payload))
                 
@@ -214,15 +205,25 @@ class InferenceEngine:
                                 conf, idx = torch.max(probs, dim=1)
                                 gesture_name = self.classes[idx]
                                 
-                                # Terminal Output & OS Action Logic
+                                # Terminal Output & OS Action Logic (GUI Integrated)
                                 if max_energy > self.noise_threshold:
                                     if conf.item() > 0.80:
-                                        # Trigger OS action only if cooldown is zero
+                                        
+                                        # Trigger logic only if cooldown is zero
                                         if self.cooldown_frames == 0:
+                                            # 1. Print to Terminal
                                             print(f"🎯 GESTURE: {gesture_name.ljust(15)} | Confidence: {conf.item()*100:2.0f}% | Energy: {max_energy:.1f}")
-                                        #     self.execute_os_action(gesture_name)
+                                            
+                                            # 2. Trigger OS Action if enabled via GUI
+                                            if self.os_control_active:
+                                                self.execute_os_action(gesture_name)
+                                                print("   ⚡ Executed OS Action!")
+                                            
+                                            # 3. Send to GUI if connected
+                                            if self.gui_callback:
+                                                self.gui_callback(gesture_name, conf.item()*100)
+                                            
                                             self.cooldown_frames = self.cooldown_threshold # Reset cooldown
-                                        #     print(f"   ⚡ Executed OS Action! Cooldown engaged.")
 
                 self.prev_rdm = curr_rdm
 
