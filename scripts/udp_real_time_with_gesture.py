@@ -7,8 +7,6 @@ import numpy as np
 import torch
 from pynput.keyboard import Key, Controller  # OS Control Import
 
-import threading
-
 # Pathing setup to ensure it runs from any directory
 current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.abspath(os.path.join(current_dir, '..'))
@@ -27,12 +25,6 @@ class InferenceEngine:
                 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = GestureRecognitionNetwork(num_classes=6).to(self.device)
-
-        # --- Threading Flags ---
-        self.is_processing_active = threading.Event()
-        self.is_processing_active.clear() # Mulai dalam keadaan PAUSED (Sesuai GUI)
-        self.shutdown_flag = threading.Event()
-        self.debug_mode = True # Dikontrol oleh GUI
         
         if os.path.exists(model_path):
             self.model.load_state_dict(torch.load(model_path, map_location=self.device))
@@ -50,13 +42,16 @@ class InferenceEngine:
 
         self.classes = ["Hand Away", "Hand Towards", "Swipe Down", "Swipe Left", "Swipe Right", "Swipe Up"]
         self.frame_counter = 0
+        
+        # --- UDP JITTER FIX ---
+        self.last_seq = -1 
 
         # --- OS Control & Debouncing Setup ---
         self.keyboard = Controller()
         self.cooldown_frames = 0
         # Wait 20 frames (~0.6 seconds at 30fps) before allowing a new OS action.
         # Tune this up or down depending on your physical radar's frame rate.
-        self.cooldown_threshold = 45
+        self.cooldown_threshold = 60
 
     def extract_rve_features(self, power_rdm, complex_cube, M=8):
         masked_rdm = power_rdm.copy()
@@ -133,13 +128,15 @@ class InferenceEngine:
     def run(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(('0.0.0.0', self.port))
-        sock.setblocking(False) 
         
-        print(f"📥 Backend siap mendengarkan port {self.port}...")
+        # Non-Blocking Mode for strict buffer draining
+        sock.setblocking(False) 
+        print(f"📥 Listening for UDP stream on port {self.port}...\n")
+        print("--- Waiting for gesture ---")
 
         try:
-            while not self.shutdown_flag.is_set():
-                # 1. Kuras Buffer UDP (Harus selalu jalan agar jaringan tidak delay)
+            while True:
+                # Buffer Drain Logic
                 latest_data = None
                 while True:
                     try:
@@ -148,29 +145,31 @@ class InferenceEngine:
                     except BlockingIOError:
                         break 
                         
+                # Sleep briefly if no packets arrived to prevent CPU maxing
                 if latest_data is None:
-                    time.sleep(0.005)
+                    time.sleep(0.005) # 5 milliseconds
                     continue
                 
-                # 2. PAUSE PURGE LOGIC (Cegah halusinasi gestur saat resume)
-                if not self.is_processing_active.is_set():
-                    self.r_buf.clear()
-                    self.v_buf.clear()
-                    self.a_buf.clear()
-                    self.e_buf.clear()
-                    self.prev_rdm = None
-                    continue # Lewati inferensi jika GUI sedang dalam status NONAKTIF
-
-                # 3. AKTIF: Eksekusi DSP & PyTorch
+                # ⏱️ START TIMER
                 start_time = time.time()
 
                 # Decrease cooldown counter every processed frame
                 if self.cooldown_frames > 0:
                     self.cooldown_frames -= 1
 
-                (_, _, _, raw_payload) = parse_full_frame(latest_data)
+                # 1. Extract the sequence number alongside the payload
+                (_, seq, _, raw_payload) = parse_full_frame(latest_data)
+                
+                # 2. STRICT FORWARD-TIME ENFORCEMENT
+                if self.last_seq != -1 and seq <= self.last_seq:
+                    # This packet arrived late due to UDP jitter. 
+                    # Processing it would scramble the TCN's temporal context.
+                    continue
+                
+                self.last_seq = seq # Update the tracker
+                
                 self.__mmw_proc.process_raw_data(list(raw_payload))
-
+                
                 curr_rdm = self.__mmw_proc.power_rdm
                 complex_cube = self.__mmw_proc.complex_cube
 
@@ -194,40 +193,67 @@ class InferenceEngine:
                         self.a_buf.pop(0)
                         self.e_buf.pop(0)
 
-                    # --- PyTorch Inference ---
-                    if len(self.r_buf) == 40 and sum(np.abs(self.v_buf)) != 0.0:
-                        rt = (torch.FloatTensor(self.r_buf) / 1.0).view(1, 1, 40).to(self.device)
-                        vt = (torch.FloatTensor(self.v_buf) / 2.0).view(1, 1, 40).to(self.device)
-                        at = (torch.FloatTensor(self.a_buf) / 1.57).view(1, 1, 40).to(self.device)
-                        et = (torch.FloatTensor(self.e_buf) / 1.57).view(1, 1, 40).to(self.device)
+                    # Continuous Inference
+                    if len(self.r_buf) == 40:
+                        
+                        # THE SILENCE GATE
+                        if sum(np.abs(self.v_buf)) != 0.0:
+                            rt_raw = torch.FloatTensor(self.r_buf)
+                            vt_raw = torch.FloatTensor(self.v_buf)
+                            at_raw = torch.FloatTensor(self.a_buf)
+                            et_raw = torch.FloatTensor(self.e_buf)
 
-                        with torch.no_grad():
-                            logits = self.model(rt, vt, at, et)
-                            probs = torch.softmax(logits, dim=1)
-                            conf, idx = torch.max(probs, dim=1)
-                            gesture_name = self.classes[idx]
-                            
-                            # --- Output & Debouncing Logic ---
-                            if max_energy > self.noise_threshold and conf.item() > 0.80:
-                                if self.cooldown_frames == 0:
-                                    if self.debug_mode:
-                                        print(f"🎯 GESTUR: {gesture_name.ljust(15)} | Conf: {conf.item()*100:2.0f}% | Energi: {max_energy:.1f}")
-                                        print(f"   ⚡ Mengeksekusi Tindakan OS! Cooldown dimulai.")
-                                    
-                                    self.execute_os_action(gesture_name)
-                                    self.cooldown_frames = self.cooldown_threshold
+                            rt = (rt_raw / 1.0).view(1, 1, 40).to(self.device)
+                            vt = (vt_raw / 2.0).view(1, 1, 40).to(self.device)
+                            at = (at_raw / 1.57).view(1, 1, 40).to(self.device)
+                            et = (et_raw / 1.57).view(1, 1, 40).to(self.device)
+
+                            with torch.no_grad():
+                                logits = self.model(rt, vt, at, et)
+                                probs = torch.softmax(logits, dim=1)
+                                conf, idx = torch.max(probs, dim=1)
+                                gesture_name = self.classes[idx]
+                                
+                                # Terminal Output & OS Action Logic
+                                if max_energy > self.noise_threshold:
+                                    if conf.item() > 0.80:
+                                        # Trigger OS action only if cooldown is zero
+                                        if self.cooldown_frames == 0:
+                                            print(f"🎯 GESTURE: {gesture_name.ljust(15)} | Confidence: {conf.item()*100:2.0f}% | Energy: {max_energy:.1f}")
+                                        #     self.execute_os_action(gesture_name)
+                                            self.cooldown_frames = self.cooldown_threshold # Reset cooldown
+                                        #     print(f"   ⚡ Executed OS Action! Cooldown engaged.")
 
                 self.prev_rdm = curr_rdm
 
-                # Heartbeat opsional
-                if self.debug_mode:
-                    self.frame_counter += 1
-                    if self.frame_counter % 60 == 0:
-                        proc_time = (time.time() - start_time) * 1000
-                        print(f"[Heartbeat] Latensi Inferensi: {proc_time:.1f} ms | Sisa Cooldown: {self.cooldown_frames}")
+                # ⏱️ STOP TIMER & PROFILE
+                end_time = time.time()
+                processing_time_ms = (end_time - start_time) * 1000
+                
+                self.frame_counter += 1
+                if self.frame_counter % 60 == 0:
+                    # Print a subtle heartbeat every ~2 seconds to prove the script hasn't frozen
+                    print(f"[System Heartbeat] Math & Inference Latency: {processing_time_ms:.1f} ms | Cooldown: {self.cooldown_frames}")
 
-        except Exception as e:
-            print(f"Error pada thread inferensi: {e}")
+        except KeyboardInterrupt:
+            print("\n🛑 Stopped by user. Shutting down gracefully...")
         finally:
             sock.close()
-            print("Socket ditutup.")
+
+def main():
+    PORT = 9575
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    root_dir = os.path.abspath(os.path.join(current_dir, ".."))
+    
+    cfg_path = os.path.join(root_dir, "radar_config", "config_3rx_2m")
+    model_path = os.path.join(root_dir, "weights", "best_fmcw_model_v51_b32.pth")
+    
+    setting_fn = find_setting_in_directory(cfg_path)
+    with open(setting_fn, 'r') as f:
+        setting = json.load(f)
+
+    engine = InferenceEngine(PORT, setting, model_path)
+    engine.run()
+
+if __name__ == '__main__':
+    main()
