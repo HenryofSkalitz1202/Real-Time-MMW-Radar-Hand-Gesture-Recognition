@@ -1,26 +1,41 @@
-import warnings
-warnings.filterwarnings("ignore")
-
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
-from sklearn.model_selection import train_test_split
-import torch.nn.functional as F
-from tqdm import tqdm
-import numpy as np
-import re
 import os
 import random
+import re
+import warnings
+
+warnings.filterwarnings("ignore")
+
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from sklearn.metrics import confusion_matrix
+from torch.utils.data import DataLoader, Subset
+from tqdm import tqdm
 
 from dataset import RadarGestureDataset
 from model.one_d_tcn import GestureRecognitionNetwork 
 from model.srdst import SRDST_Adapted_Network
 from model.lstm import LSTM_Gesture_Network
-from sklearn.model_selection import GroupShuffleSplit
-from torch.utils.data import Subset, DataLoader
+
+def set_seed(seed=42):
+    """Locks all random seeds for complete reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 def main():
+    # 1. Lock seeds immediately
+    set_seed(42)
+    
     print("="*50)
     print("mmWave Hand Gesture Recognition Pipeline (4-Feature Edition)")
     print("="*50)
@@ -28,7 +43,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # --- 1. Load Dataset FIRST to dynamically get num_classes ---
+    # --- 2. Load Dataset FIRST to dynamically get num_classes ---
     print("\nLoading dataset...")
     full_dataset = RadarGestureDataset(data_dir="Data", seq_length=40)
     labels = [sample[1] for sample in full_dataset.samples]
@@ -36,7 +51,7 @@ def main():
     NUM_CLASSES = len(full_dataset.classes)
     print(f"Detected {NUM_CLASSES} classes: {full_dataset.classes}")
 
-    # --- 2. Model Selection UI ---
+    # --- 3. Model Selection UI ---
     print("\nAvailable Models:")
     print("1: FMCW Lightweight (DS-TCN + ECA)         [UPDATED FOR 4 INPUTS]")
     print("2: SRDST Adapted (Dual-Stream Transformer) [UPDATED FOR 4 INPUTS]")
@@ -47,74 +62,112 @@ def main():
     if choice == '3':
         print(f"Initializing LSTM Model for {NUM_CLASSES} classes...")
         model = LSTM_Gesture_Network(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_lstm_model_v51_b8_paper_rand.pth"
+        save_filename = "best_lstm_model_v51_rs_01.pth"
         model_name = "LSTM"
     elif choice == '2':
         print(f"Initializing SRDST Adapted Model for {NUM_CLASSES} classes...")
         model = SRDST_Adapted_Network(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_srdst_model_v51_b8_paper_rand.pth"
+        save_filename = "best_srdst_model_v51_rs_01.pth"
         model_name = "SRDST"
     else:
         if choice != '1':
             print("Invalid input. Defaulting to FMCW Lightweight Model...")
         print(f"Initializing FMCW Lightweight Model for {NUM_CLASSES} classes...")
         model = GestureRecognitionNetwork(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_fmcw_model_v51_b8_paper_rand.pth"
+        save_filename = "best_fmcw_model_v51_rs_01.pth"
         model_name = "TCN"
 
-    # --- 3. Hyperparameters ---
+    # --- 4. Hyperparameters ---
     num_epochs = 100
     learning_rate = 0.001
-    batch_size = 32
+    batch_size = 16
 
-# --- 4. Split the Dataset ---
-    # VAL_INDICES = set(random.sample(range(1, 251), 100))
+    # --- 5. Split the Dataset (Robust File-Checking Method) ---
+    def get_file_number(filepath):
+        """Extracts the first number found in the filename."""
+        filename = os.path.basename(str(filepath))
+        nums = re.findall(r'\d+', filename)
+        return int(nums[0]) if nums else None
+    
+    # 1. Cari semua ID yang BENAR-BENAR ada di folder dataset Anda
+    existing_ids = set()
+    for filepath, _ in full_dataset.samples:
+        file_num = get_file_number(filepath)
+        if file_num is not None:
+            existing_ids.add(file_num)
 
-    # def split_index(filepath):
-    #     filename = os.path.basename(str(filepath))
-    #     nums = re.findall(r'\d+', filename)
-    #     if not nums: 
-    #         return "unknown"
+    # Fungsi pembantu untuk mengumpulkan ID yang valid dalam rentang tertentu
+    def get_valid_pool(ranges, existing):
+        pool = []
+        for start, end in ranges:
+            pool.extend([n for n in existing if start <= n <= end])
+        return pool
+
+    # 2. Kumpulkan ID berdasarkan Subjek (Sesuai Indeks di Tabel)
+    pool_A = get_valid_pool([(1, 200), (701, 800)], existing_ids)
+    pool_C = get_valid_pool([(601, 700)], existing_ids)
+    pool_E = get_valid_pool([(451, 500)], existing_ids)
+    pool_F = get_valid_pool([(251, 300)], existing_ids)
+    pool_I = get_valid_pool([(321, 370)], existing_ids)
+    pool_H = get_valid_pool([(426, 450)], existing_ids)
+    
+    pool_G = get_valid_pool([(201, 250), (801, 810)], existing_ids) # Khusus Val
+
+    # 3. Lakukan Sampling sesuai "Jumlah Data" di Tabel
+    # Menggunakan min() agar terhindar dari error jika data asli kurang dari target
+    train_A = random.sample(pool_A, min(25, len(pool_A)))
+    train_C = random.sample(pool_C, min(50, len(pool_C)))
+    train_E = random.sample(pool_E, min(50, len(pool_E)))
+    train_F = random.sample(pool_F, min(50, len(pool_F)))
+    train_I = random.sample(pool_I, min(40, len(pool_I)))
+    train_H = random.sample(pool_H, min(25, len(pool_H)))
+
+    # Subjek G seluruhnya dialokasikan untuk Validation (Target: 60)
+    val_G = random.sample(pool_G, min(60, len(pool_G)))
+
+    # 4. Gabungkan ke dalam TRAIN_POOL dan VAL_POOL master
+    TRAIN_POOL = set(train_A + train_C + train_E + train_F + train_I + train_H)
+    VAL_POOL = set(val_G)
+
+    # 5. Distribusikan indeks dataset berdasarkan ID filenya
+    train_idx = []
+    val_idx = []
+
+    for i, (filepath, _) in enumerate(full_dataset.samples):
+        file_num = get_file_number(filepath)
         
-    #     num = int(nums[0])
-    
-    #     if num in VAL_INDICES: 
-    #         return "VAL"        
-    #     else: 
-    #         return "TRAIN"
+        if file_num is None:
+            continue
+            
+        if file_num in VAL_POOL:
+            val_idx.append(i)
+        elif file_num in TRAIN_POOL:
+            train_idx.append(i)
 
-    # train_idx = []
-    # val_idx = []
-    
-    # for i, (filepath, _) in enumerate(full_dataset.samples):
-    #     idx_counter = split_index(filepath)
-    #     if idx_counter == "VAL":
-    #         val_idx.append(i)
-    #     elif idx_counter == "TRAIN":
-    #         train_idx.append(i)
-
-    train_idx, val_idx = train_test_split(
-        range(len(full_dataset)), 
-        test_size=0.2, 
-        stratify=labels, 
-        random_state=42
-    )
-    
+    # 6. Buat PyTorch subsets
     train_dataset = Subset(full_dataset, train_idx)
     val_dataset = Subset(full_dataset, val_idx)
-    
+
     print(f"Data Split - Train: {len(train_dataset)}, Val: {len(val_dataset)}")
-    print(f"Validation percentage: {(len(val_dataset) / (len(train_dataset) + len(val_dataset))) * 100:.2f}%\n")
+    if len(train_dataset) + len(val_dataset) > 0:
+        print(f"Validation percentage: {(len(val_dataset) / (len(train_dataset) + len(val_dataset))) * 100:.2f}%\n")
+    else:
+        print("Error: Dataset appears to be empty based on your ID rules!\n")
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    # --- 5. Loss and Optimizer ---
+    # --- 6. Loss and Optimizer ---
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
-    
-    # --- 6. Training Loop ---
+    #optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+    # --- 7. Training Loop ---
     best_val_acc = 0.0
+
+    history_train_loss, history_val_loss = [], []
+    history_train_acc, history_val_acc = [], []
+
     print(f"\nStarting Training for {model_name}...")
 
     for epoch in range(num_epochs):
@@ -130,51 +183,9 @@ def main():
             el_seq = el_seq.to(device)
             batch_labels = batch_labels.to(device)
 
-            # --- DATA AUGMENTATION (Training Only) ---
-            # # 1. Amplitude Scaling (Simulates distance variations)
-            # scale = torch.empty(batch_labels.size(0), 1, 1, device=device).uniform_(0.8, 1.2)
-            # range_seq = range_seq * scale
-            # vel_seq = vel_seq * scale
-
-            # # 2. ASYMMETRIC Gaussian Noise
-            # # R/V can handle 0.02, but Az/El need 0.005 to protect the Left/Right phase boundary
-            # noise_level_rv = 0.02
-            # noise_level_azel = 0.005
-
-            # noise_r = torch.randn_like(range_seq) * noise_level_rv
-            # noise_v = torch.randn_like(vel_seq) * noise_level_rv
-            # noise_a = torch.randn_like(az_seq) * noise_level_azel
-            # noise_e = torch.randn_like(el_seq) * noise_level_azel
-            
-            # range_seq = range_seq + noise_r
-            # vel_seq = vel_seq + noise_v
-            # az_seq = az_seq + noise_a
-            # el_seq = el_seq + noise_e
-
-            # # BOUNDARY PROTECTION: Clamp angles so noise doesn't exceed physical radians
-            # az_seq = torch.clamp(az_seq, -1.0, 1.0)
-            # el_seq = torch.clamp(el_seq, -1.0, 1.0)
-
-            # # 4. Temporal Shifting (Crucial for Time-Series)
-            # shift = torch.randint(-4, 5, (1,)).item()
-            # if shift > 0:
-            #     # Shift right (gesture starts later) -> push data right, pad left with zeros
-            #     range_seq = F.pad(range_seq[:, :, :-shift], (shift, 0), value=0.0)
-            #     vel_seq = F.pad(vel_seq[:, :, :-shift], (shift, 0), value=0.0)
-            #     az_seq = F.pad(az_seq[:, :, :-shift], (shift, 0), value=0.0)
-            #     el_seq = F.pad(el_seq[:, :, :-shift], (shift, 0), value=0.0)
-            # elif shift < 0:
-            #     # Shift left (gesture starts earlier) -> push data left, pad right with zeros
-            #     shift_abs = abs(shift)
-            #     range_seq = F.pad(range_seq[:, :, shift_abs:], (0, shift_abs), value=0.0)
-            #     vel_seq = F.pad(vel_seq[:, :, shift_abs:], (0, shift_abs), value=0.0)
-            #     az_seq = F.pad(az_seq[:, :, shift_abs:], (0, shift_abs), value=0.0)
-            #     el_seq = F.pad(el_seq[:, :, shift_abs:], (0, shift_abs), value=0.0)
-            # -----------------------------------------
-
             optimizer.zero_grad()
             
-            # ---> UNIFIED FORWARD PASS: All 3 models now natively accept 4 inputs!
+            # ---> UNIFIED FORWARD PASS
             outputs = model(range_seq, vel_seq, az_seq, el_seq)
                 
             loss = criterion(outputs, batch_labels)
@@ -190,6 +201,9 @@ def main():
 
         avg_train_loss = train_loss / len(train_loader)
         train_acc = (correct_train / total_train) * 100
+
+        history_train_loss.append(avg_train_loss)
+        history_train_acc.append(train_acc)
 
         # -- Validation Phase --
         model.eval()
@@ -215,6 +229,9 @@ def main():
 
         avg_val_loss = val_loss / len(val_loader)
         val_acc = (correct_val / total_val) * 100
+
+        history_val_loss.append(avg_val_loss)
+        history_val_acc.append(val_acc)
         
         print(f"Epoch {epoch+1}/{num_epochs} | Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}% | Avg Train Loss: {avg_train_loss:.4f} | Avg Val Loss: {avg_val_loss:.4f}")
         
@@ -226,12 +243,41 @@ def main():
     print(f"\nTraining Finished! Best Validation Accuracy for {model_name}: {best_val_acc:.2f}%")
 
     # ==========================================
+    # DEBUGGING: Training Curves (Loss & Accuracy)
+    # ==========================================
+    print(f"\n--- Generating Learning Curves for {model_name} ---")
+    epochs_range = range(1, num_epochs + 1)
+    
+    plt.figure(figsize=(14, 5))
+    
+    # Subplot 1: Loss
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs_range, history_train_loss, label='Train Loss', color='blue')
+    plt.plot(epochs_range, history_val_loss, label='Val Loss', color='orange')
+    plt.title('Training and Validation Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.7)
+    
+    # Subplot 2: Accuracy
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs_range, history_train_acc, label='Train Accuracy', color='blue')
+    plt.plot(epochs_range, history_val_acc, label='Val Accuracy', color='orange')
+    plt.title('Training and Validation Accuracy')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy (%)')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.7)
+    
+    plt.tight_layout()
+    curves_filename = f"debug_learning_curves_51_rs_01_{model_name}.png"
+    plt.savefig(curves_filename, dpi=300)
+    print(f"Saved learning curves to '{curves_filename}'. Please review it!")
+
+    # ==========================================
     # DEBUGGING: Post-Training Confusion Matrix
     # ==========================================
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    from sklearn.metrics import confusion_matrix
-
     print(f"\n--- Generating Debug Confusion Matrix for {model_name} ---")
     model.load_state_dict(torch.load(save_filename))
     model.eval()
@@ -269,7 +315,7 @@ def main():
     plt.tight_layout()
     
     # Dynamic filename ensures no overwrites!
-    cm_filename = f"debug_confusion_matrix_51_b8_paper_rand_{model_name}.png"
+    cm_filename = f"debug_confusion_matrix_51_rs_01_{model_name}.png"
     plt.savefig(cm_filename, dpi=300)
     print(f"Saved '{cm_filename}'. Please review it!")
 
@@ -282,7 +328,7 @@ def main():
     model.load_state_dict(torch.load(save_filename))
     model.eval()
 
-    log_filename = f"misclassified_log_51_b8_paper_rand_{model_name}.csv"
+    log_filename = f"misclassified_log_51_rs_01_{model_name}.csv"
     
     with open(log_filename, "w") as f:
         f.write("True_Class,Predicted_Class,File_Path\n")
