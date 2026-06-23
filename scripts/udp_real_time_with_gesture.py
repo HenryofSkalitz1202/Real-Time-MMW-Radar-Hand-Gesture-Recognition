@@ -247,7 +247,7 @@ def main():
     root_dir = os.path.abspath(os.path.join(current_dir, ".."))
     
     cfg_path = os.path.join(root_dir, "radar_config", "config_3rx_2m")
-    model_path = os.path.join(root_dir, "weights", "best_fmcw_model_v51_b32.pth")
+    model_path = os.path.join(root_dir, "weights_gacor", "best_fmcw_model_v51_b32.pth")
     
     setting_fn = find_setting_in_directory(cfg_path)
     with open(setting_fn, 'r') as f:

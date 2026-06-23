@@ -5,8 +5,8 @@ import pandas as pd
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(parent_dir)
 
-# Import the NEW v1 Cube Processor
-from utility.mmw_cube_proc_v1 import CubeProcessor
+# Import the NEW v2 Cube Processor
+from utility.mmw_cube_proc_v2 import CubeProcessor
 from utility.helper import find_setting_in_directory
 
 def save_to_research_csv(points, filename):
