@@ -23,7 +23,7 @@ class InferenceEngine:
         self.port = port
         
         self.__mmw_proc = CubeProcessor(setting, mti_alpha=0.5)
-        self.noise_threshold = 2.5 
+        self.noise_threshold = 2.7
                 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = GestureRecognitionNetwork(num_classes=6).to(self.device)
@@ -57,7 +57,7 @@ class InferenceEngine:
         
         self.keyboard = Controller()
         self.cooldown_frames = 0
-        self.cooldown_threshold = 45
+        self.cooldown_threshold = 60
 
         self.os_control_active = False
         self.gui_callback = None
@@ -97,19 +97,23 @@ class InferenceEngine:
 
     def execute_os_action(self, gesture):
         if gesture == "Swipe Left":
-            self.keyboard.press(Key.media_previous)
-            self.keyboard.release(Key.media_previous)
-        elif gesture == "Swipe Right":
-            self.keyboard.press(Key.media_next)
-            self.keyboard.release(Key.media_next)
-        elif gesture == "Swipe Up":
-            for _ in range(4):
-                self.keyboard.press(Key.media_volume_up)
-                self.keyboard.release(Key.media_volume_up)
-        elif gesture == "Swipe Down":
             for _ in range(4):
                 self.keyboard.press(Key.media_volume_down)
                 self.keyboard.release(Key.media_volume_down)
+            # self.keyboard.press(Key.media_previous)
+            # self.keyboard.release(Key.media_previous)
+        elif gesture == "Swipe Right":
+            for _ in range(4):
+                self.keyboard.press(Key.media_volume_up)
+                self.keyboard.release(Key.media_volume_up)
+            # self.keyboard.press(Key.media_next)
+            # self.keyboard.release(Key.media_next)
+        elif gesture == "Swipe Up":
+            self.keyboard.press(Key.media_next)
+            self.keyboard.release(Key.media_next)
+        elif gesture == "Swipe Down":
+            self.keyboard.press(Key.media_previous)
+            self.keyboard.release(Key.media_previous)
         elif gesture == "Hand Towards" or gesture == "Hand Away":
             self.keyboard.press(Key.media_play_pause)
             self.keyboard.release(Key.media_play_pause)
@@ -154,7 +158,6 @@ class InferenceEngine:
                 
                 max_energy = np.max(np.log10(curr_rdm + 1e-9))
                 
-                # Unconditional Extraction: Build natural room noise continuity
                 r, v, a, e = self.extract_rve_features(curr_rdm, complex_cube, M=20)
 
                 self.r_buf.append(r)
@@ -241,7 +244,7 @@ def main():
     root_dir = os.path.abspath(os.path.join(current_dir, ".."))
     
     cfg_path = os.path.join(root_dir, "radar_config", "config_3rx_2m")
-    model_path = os.path.join(root_dir, "weights", "best_fmcw_model_v51_ss_01.pth")
+    model_path = os.path.join(root_dir, "weights_gacor", "best_fmcw_model_v51_ss_01.pth")
     
     setting_fn = find_setting_in_directory(cfg_path)
     with open(setting_fn, 'r') as f:
