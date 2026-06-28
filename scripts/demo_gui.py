@@ -7,7 +7,7 @@ import threading
 import queue
 import customtkinter as ctk
 
-from udp_real_time_with_gesture import InferenceEngine, find_setting_in_directory
+from new_udp_real_time_with_gesture import InferenceEngine, find_setting_in_directory
 
 class InferenceThread(threading.Thread):
     """
@@ -26,7 +26,7 @@ class InferenceThread(threading.Thread):
         root_dir = os.path.abspath(os.path.join(current_dir, ".."))
         
         cfg_path = os.path.join(root_dir, "radar_config", "config_3rx_2m")
-        model_path = os.path.join(root_dir, "weights", "best_fmcw_model_v51_b32.pth")
+        model_path = os.path.join(root_dir, "weights_gacor", "best_fmcw_model_v51_ss_01.pth")
         
         setting_fn = find_setting_in_directory(cfg_path)
         with open(setting_fn, 'r') as f:
