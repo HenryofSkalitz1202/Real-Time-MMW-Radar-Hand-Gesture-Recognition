@@ -33,7 +33,7 @@ class RadarGestureDataset(Dataset):
         file_path, label = self.samples[idx]
         
         # Call the RVE script to get the (3, 40) matrix
-        feature_matrix = process_csv_to_tensor(file_path, self.seq_length)
+        feature_matrix = process_csv_to_tensor(file_path, self.seq_length, M=7)
         
         # Convert to PyTorch Tensors
         # Split the matrix into 3 separate branches (Range, Velocity, Azimuth)

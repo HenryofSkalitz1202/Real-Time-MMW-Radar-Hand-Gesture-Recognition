@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import torch.optim.lr_scheduler as lr_scheduler
 from sklearn.metrics import confusion_matrix
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
@@ -20,6 +21,7 @@ from dataset import RadarGestureDataset
 from model.one_d_tcn import GestureRecognitionNetwork 
 from model.srdst import SRDST_Adapted_Network
 from model.lstm import LSTM_Gesture_Network
+from model.inception_srdst import InceptionSRDST
 
 def set_seed(seed=42):
     """Locks all random seeds for complete reproducibility."""
@@ -56,30 +58,36 @@ def main():
     print("1: FMCW Lightweight (DS-TCN + ECA)         [UPDATED FOR 4 INPUTS]")
     print("2: SRDST Adapted (Dual-Stream Transformer) [UPDATED FOR 4 INPUTS]")
     print("3: LSTM (Grobelny & Narbudowicz)           [UPDATED FOR 4 INPUTS]")
+    print("4: InceptionSRDST (Original Modified)           [UPDATED FOR 4 INPUTS]")
     
-    choice = input("Enter the number of the model to train (1, 2, or 3): ").strip()
+    choice = input("Enter the number of the model to train (1, 2, 3, or 4): ").strip()
 
     if choice == '3':
         print(f"Initializing LSTM Model for {NUM_CLASSES} classes...")
         model = LSTM_Gesture_Network(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_lstm_model_v51_rs_01.pth"
+        save_filename = "best_lstm_model_v51_ss_01_update_80_gemparams.pth"
         model_name = "LSTM"
+    elif choice == '4':
+        print(f"Initializing InceptionSRDST Model for {NUM_CLASSES} classes...")
+        model = InceptionSRDST(num_classes=NUM_CLASSES).to(device)
+        save_filename = "best_inception_srdst_model_v51_ss_01_update_80_gemparams.pth"
+        model_name = "InceptionSRDST"
     elif choice == '2':
         print(f"Initializing SRDST Adapted Model for {NUM_CLASSES} classes...")
         model = SRDST_Adapted_Network(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_srdst_model_v51_rs_01.pth"
+        save_filename = "best_srdst_model_v51_ss_01_update_80_gemparams.pth"
         model_name = "SRDST"
     else:
         if choice != '1':
             print("Invalid input. Defaulting to FMCW Lightweight Model...")
         print(f"Initializing FMCW Lightweight Model for {NUM_CLASSES} classes...")
         model = GestureRecognitionNetwork(num_classes=NUM_CLASSES).to(device)
-        save_filename = "best_fmcw_model_v51_rs_01.pth"
+        save_filename = "best_fmcw_model_v51_ss_01_update_80_gemparams.pth"
         model_name = "TCN"
 
     # --- 4. Hyperparameters ---
     num_epochs = 100
-    learning_rate = 0.001
+    learning_rate = 0.0001
     batch_size = 16
 
     # --- 5. Split the Dataset (Robust File-Checking Method) ---
@@ -89,62 +97,31 @@ def main():
         nums = re.findall(r'\d+', filename)
         return int(nums[0]) if nums else None
     
-    # 1. Cari semua ID yang BENAR-BENAR ada di folder dataset Anda
-    existing_ids = set()
-    for filepath, _ in full_dataset.samples:
-        file_num = get_file_number(filepath)
-        if file_num is not None:
-            existing_ids.add(file_num)
+    # 1. Define the full valid pool of numbers (1-200 and 700-800)
+    pool_1 = list(range(1, 201))    # 1 to 200
+    pool_2 = list(range(701, 801))  # 701 to 800
+    pool_3 = list(range(911, 1011)) # 911 to 1010
+    valid_pool = set(pool_1 + pool_2 + pool_3)
 
-    # Fungsi pembantu untuk mengumpulkan ID yang valid dalam rentang tertentu
-    def get_valid_pool(ranges, existing):
-        pool = []
-        for start, end in ranges:
-            pool.extend([n for n in existing if start <= n <= end])
-        return pool
+    # 2. Pick exactly 80 random numbers from that pool for the validation set
+    random.seed(42)  # For reproducibility
+    VAL_NUMS = set(random.sample(list(valid_pool), 80))
 
-    # 2. Kumpulkan ID berdasarkan Subjek (Sesuai Indeks di Tabel)
-    pool_A = get_valid_pool([(1, 200), (701, 800)], existing_ids)
-    pool_C = get_valid_pool([(601, 700)], existing_ids)
-    pool_E = get_valid_pool([(451, 500)], existing_ids)
-    pool_F = get_valid_pool([(251, 300)], existing_ids)
-    pool_I = get_valid_pool([(321, 370)], existing_ids)
-    pool_H = get_valid_pool([(426, 450)], existing_ids)
-    
-    pool_G = get_valid_pool([(201, 250), (801, 810)], existing_ids) # Khusus Val
-
-    # 3. Lakukan Sampling sesuai "Jumlah Data" di Tabel
-    # Menggunakan min() agar terhindar dari error jika data asli kurang dari target
-    train_A = random.sample(pool_A, min(25, len(pool_A)))
-    train_C = random.sample(pool_C, min(50, len(pool_C)))
-    train_E = random.sample(pool_E, min(50, len(pool_E)))
-    train_F = random.sample(pool_F, min(50, len(pool_F)))
-    train_I = random.sample(pool_I, min(40, len(pool_I)))
-    train_H = random.sample(pool_H, min(25, len(pool_H)))
-
-    # Subjek G seluruhnya dialokasikan untuk Validation (Target: 60)
-    val_G = random.sample(pool_G, min(60, len(pool_G)))
-
-    # 4. Gabungkan ke dalam TRAIN_POOL dan VAL_POOL master
-    TRAIN_POOL = set(train_A + train_C + train_E + train_F + train_I + train_H)
-    VAL_POOL = set(val_G)
-
-    # 5. Distribusikan indeks dataset berdasarkan ID filenya
+    # 3. Separate the dataset indices based on your rules
     train_idx = []
     val_idx = []
 
     for i, (filepath, _) in enumerate(full_dataset.samples):
         file_num = get_file_number(filepath)
         
-        if file_num is None:
-            continue
-            
-        if file_num in VAL_POOL:
+        if file_num in VAL_NUMS:
+            # If it's one of the 60 sampled numbers, it goes to validation
             val_idx.append(i)
-        elif file_num in TRAIN_POOL:
+        elif file_num in valid_pool:
+            # If it's in the ranges but wasn't picked for val, it goes to training
             train_idx.append(i)
+        # Note: Any file number outside 1-200 or 701-800 is ignored completely
 
-    # 6. Buat PyTorch subsets
     train_dataset = Subset(full_dataset, train_idx)
     val_dataset = Subset(full_dataset, val_idx)
 
@@ -158,9 +135,15 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
     # --- 6. Loss and Optimizer ---
-    criterion = nn.CrossEntropyLoss()
-    #optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    # Paper parameters (Kim et al., 2025)
+    # criterion = nn.CrossEntropyLoss()
+    # optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+    # Gem Params
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-2)
+
+    scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
 
     # --- 7. Training Loop ---
     best_val_acc = 0.0
@@ -182,6 +165,23 @@ def main():
             az_seq = az_seq.to(device)
             el_seq = el_seq.to(device)
             batch_labels = batch_labels.to(device)
+
+            # AUGMENTATION BLOCK (GEM PARAMS)
+            # Only inject noise 50% of the time to maintain clean data learning
+            if random.random() > 0.5:
+                noise_std = 0.01  # Small variance
+                range_seq += torch.randn_like(range_seq) * noise_std
+                vel_seq += torch.randn_like(vel_seq) * noise_std
+                az_seq += torch.randn_like(az_seq) * noise_std
+                el_seq += torch.randn_like(el_seq) * noise_std
+            
+            if random.random() > 0.5:
+                shift_amount = random.randint(-5, 5)
+                range_seq = torch.roll(range_seq, shifts=shift_amount, dims=-1)
+                vel_seq = torch.roll(vel_seq, shifts=shift_amount, dims=-1)
+                az_seq = torch.roll(az_seq, shifts=shift_amount, dims=-1)
+                el_seq = torch.roll(el_seq, shifts=shift_amount, dims=-1)
+            # ----------------------------------------
 
             optimizer.zero_grad()
             
@@ -240,6 +240,9 @@ def main():
             torch.save(model.state_dict(), save_filename)
             print(f"  -> Saved new best model to {save_filename}!")
 
+        # Gem Params
+        scheduler.step()
+
     print(f"\nTraining Finished! Best Validation Accuracy for {model_name}: {best_val_acc:.2f}%")
 
     # ==========================================
@@ -271,7 +274,7 @@ def main():
     plt.grid(True, linestyle='--', alpha=0.7)
     
     plt.tight_layout()
-    curves_filename = f"debug_learning_curves_51_rs_01_{model_name}.png"
+    curves_filename = f"debug_learning_curves_51_ss_01_update_80_gemparams_{model_name}.png"
     plt.savefig(curves_filename, dpi=300)
     print(f"Saved learning curves to '{curves_filename}'. Please review it!")
 
@@ -315,7 +318,7 @@ def main():
     plt.tight_layout()
     
     # Dynamic filename ensures no overwrites!
-    cm_filename = f"debug_confusion_matrix_51_rs_01_{model_name}.png"
+    cm_filename = f"debug_confusion_matrix_51_ss_01_update_80_gemparams_{model_name}.png"
     plt.savefig(cm_filename, dpi=300)
     print(f"Saved '{cm_filename}'. Please review it!")
 
@@ -328,7 +331,7 @@ def main():
     model.load_state_dict(torch.load(save_filename))
     model.eval()
 
-    log_filename = f"misclassified_log_51_rs_01_{model_name}.csv"
+    log_filename = f"misclassified_log_51_ss_01_update_80_gemparams_{model_name}.csv"
     
     with open(log_filename, "w") as f:
         f.write("True_Class,Predicted_Class,File_Path\n")
